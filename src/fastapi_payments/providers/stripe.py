@@ -27,8 +27,7 @@ class StripeProvider(PaymentProvider):
         else:
             self.api_version = "2023-10-16"
 
-        logger.info(f"Initialized Stripe provider with API version {
-                    self.api_version}")
+        logger.info(f"Initialized Stripe provider with API version {self.api_version}")
 
         # Import stripe only if not in test mode
         if not self.sandbox_mode:

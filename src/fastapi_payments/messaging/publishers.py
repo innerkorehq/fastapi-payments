@@ -52,8 +52,7 @@ class InMemoryBroker:
             }
         )
         logger.debug(
-            f"Published message to in-memory broker with routing key {
-                routing_key}"
+            f"Published message to in-memory broker with routing key {routing_key}"
         )
 
         # Notify subscribers if any
@@ -139,8 +138,7 @@ class PaymentEventPublisher:
                     "exchange_type": getattr(self.config, "exchange_type", "topic"),
                     "durable": getattr(self.config, "exchange_durable", True),
                 }
-                logger.info(f"Initialized RabbitMQ broker at {
-                            self.config.url}")
+                logger.info(f"Initialized RabbitMQ broker at {self.config.url}")
                 return broker
             except ImportError:
                 logger.warning(
@@ -192,8 +190,7 @@ class PaymentEventPublisher:
         # Fallback to in-memory broker
         else:
             logger.warning(
-                f"Unsupported broker type: {
-                    broker_type}. Falling back to in-memory broker."
+                f"Unsupported broker type: {broker_type}. Falling back to in-memory broker."
             )
             return InMemoryBroker()
 
@@ -245,22 +242,19 @@ class PaymentEventPublisher:
                 await self.broker.publish(message, topic=topic)
 
             elif broker_type == "redis" or hasattr(self, "stream_maxlen"):
-                stream = f"{getattr(self.config, 'exchange_name', 'payments')}:{
-                    routing_key.replace('.', ':')}"
+                stream = f"{getattr(self.config, 'exchange_name', 'payments')}:{routing_key.replace('.', ':')}"
                 await self.broker.publish(
                     message, stream=stream, maxlen=self.stream_maxlen
                 )
 
             elif broker_type == "nats" and hasattr(self, "subject_prefix"):
-                subject = f"{self.subject_prefix}{
-                    routing_key.replace('.', '.')}"
+                subject = f"{self.subject_prefix}{routing_key.replace('.', '.')}"
                 await self.broker.publish(message, subject=subject)
 
             else:  # Use the generic method for our in-memory broker or any other case
                 await self.broker.publish(message, routing_key=routing_key)
 
-            logger.debug(f"Published event {
-                         event_type} with routing key {routing_key}")
+            logger.debug(f"Published event {event_type} with routing key {routing_key}")
 
         except Exception as e:
             logger.error(f"Failed to publish event {event_type}: {str(e)}")

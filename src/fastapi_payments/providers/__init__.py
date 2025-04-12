@@ -45,8 +45,7 @@ def get_provider(
                 provider_class = getattr(module, class_name)
             except (ImportError, AttributeError) as e:
                 logger.error(
-                    f"Could not load custom provider class {
-                        provider_class_path}: {str(e)}"
+                    f"Could not load custom provider class {provider_class_path}: {str(e)}"
                 )
 
     # If no custom class or loading failed, use built-in providers
