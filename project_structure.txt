@@ -1,0 +1,70 @@
+fastapi-payments/
+├── pyproject.toml
+├── README.md
+├── src/
+│   └── fastapi_payments/
+│       ├── __init__.py
+│       ├── config/
+│       │   ├── __init__.py
+│       │   ├── settings.py
+│       │   └── config_schema.py
+│       ├── db/
+│       │   ├── __init__.py
+│       │   ├── models.py
+│       │   └── repositories.py
+│       ├── providers/
+│       │   ├── __init__.py
+│       │   ├── base.py
+│       │   ├── stripe.py
+│       │   ├── paypal.py
+│       │   └── adyen.py
+│       ├── pricing/
+│       │   ├── __init__.py
+│       │   ├── base.py
+│       │   ├── subscription.py
+│       │   ├── usage_based.py
+│       │   ├── tiered.py
+│       │   ├── per_user.py
+│       │   ├── freemium.py
+│       │   ├── dynamic.py
+│       │   └── hybrid.py
+│       ├── api/
+│       │   ├── __init__.py
+│       │   ├── routes.py
+│       │   └── dependencies.py
+│       ├── schemas/
+│       │   ├── __init__.py
+│       │   ├── payment.py
+│       │   └── pricing.py
+│       ├── services/
+│       │   ├── __init__.py
+│       │   ├── payment_service.py
+│       │   └── pricing_service.py
+│       ├── messaging/
+│       │   ├── __init__.py
+│       │   ├── consumers.py
+│       │   └── publishers.py
+│       └── utils/
+│           ├── __init__.py
+│           ├── exceptions.py
+│           └── helpers.py
+├──tests/
+    ├── __init__.py
+    ├── conftest.py                # Test fixtures and configuration
+    ├── test_config.py             # Configuration tests
+    ├── test_providers/            # Provider tests
+    │   ├── __init__.py
+    │   ├── test_stripe.py
+    │   ├── test_paypal.py
+    │   └── test_adyen.py
+    ├── test_pricing/              # Pricing model tests
+    │   ├── __init__.py
+    │   ├── test_subscription.py
+    │   ├── test_usage_based.py
+    │   ├── test_tiered.py
+    │   ├── test_per_user.py
+    │   ├── test_freemium.py
+    │   ├── test_dynamic.py
+    │   └── test_hybrid.py
+    ├── test_api.py                # API endpoint tests
+    └── test_integration.py        # Integration tests

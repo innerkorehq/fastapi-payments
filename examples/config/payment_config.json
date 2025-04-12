@@ -1,0 +1,67 @@
+{
+  "providers": {
+    "stripe": {
+      "api_key": "sk_test_your_stripe_key",
+      "webhook_secret": "whsec_your_webhook_secret",
+      "sandbox_mode": true,
+      "additional_settings": {
+        "api_version": "2023-10-16"
+      }
+    },
+    "paypal": {
+      "api_key": "your_paypal_client_id",
+      "api_secret": "your_paypal_secret",
+      "sandbox_mode": true
+    },
+    "adyen": {
+      "api_key": "your_adyen_api_key",
+      "webhook_secret": "your_adyen_webhook_secret",
+      "sandbox_mode": true,
+      "additional_settings": {
+        "merchant_account": "YourMerchantAccount"
+      }
+    }
+  },
+  "database": {
+    "url": "postgresql+asyncpg://user:password@localhost/payments",
+    "echo": false,
+    "pool_size": 5,
+    "max_overflow": 10
+  },
+  "rabbitmq": {
+    "url": "amqp://guest:guest@localhost/",
+    "exchange": "payments",
+    "queue_prefix": "payment_",
+    "consumer_count": 2,
+    "prefetch_count": 10
+  },
+  "pricing": {
+    "default_currency": "USD",
+    "default_pricing_model": "subscription",
+    "round_to_decimal_places": 2,
+    "allow_custom_pricing": true,
+    "tax": {
+      "default_rate": 0.0,
+      "included_in_price": false,
+      "use_tax_service": false
+    }
+  },
+  "default_provider": "stripe",
+  "retry_attempts": 3,
+  "retry_delay": 5,
+  "notification": {
+    "enabled": true,
+    "email_notifications": true,
+    "email_provider": "sendgrid",
+    "email_settings": {
+      "api_key": "your_sendgrid_api_key",
+      "from_email": "payments@yourdomain.com",
+      "from_name": "Your Company Payments"
+    },
+    "webhook_notifications": false,
+    "webhook_urls": []
+  },
+  "logging_level": "INFO",
+  "debug_mode": false,
+  "allowed_currencies": ["USD", "EUR", "GBP"]
+}
