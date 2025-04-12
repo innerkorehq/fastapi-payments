@@ -61,7 +61,7 @@ async def root():
     return {
         "message": "Welcome to the Payment API",
         "docs": "/docs",
-        "version": "0.1.0",
+        "version": "0.1.1",
     }
 
 
