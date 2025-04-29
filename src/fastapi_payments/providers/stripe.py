@@ -29,18 +29,25 @@ class StripeProvider(PaymentProvider):
 
         logger.info(f"Initialized Stripe provider with API version {self.api_version}")
 
-        # Import stripe only if not in test mode
-        if not self.sandbox_mode:
-            try:
-                import stripe
+        # Always try to import the Stripe SDK when available
+        self.using_real_sdk = False
+        try:
+            import stripe
+            stripe.api_key = self.api_key
+            stripe.api_version = self.api_version
+            self.stripe = stripe
+            self.using_real_sdk = True
+            logger.info("Using real Stripe SDK")
+        except ImportError:
+            logger.warning(
+                "Stripe package not installed. Install with 'pip install stripe'"
+            )
+            self.stripe = None
 
-                stripe.api_key = self.api_key
-                stripe.api_version = self.api_version
-                self.stripe = stripe
-            except ImportError:
-                logger.warning(
-                    "Stripe package not installed. Install with 'pip install stripe'"
-                )
+        if self.sandbox_mode:
+            logger.info("Running in sandbox mode: using mock implementations for API calls")
+        elif not self.using_real_sdk:
+            logger.warning("Not in sandbox mode but Stripe SDK not available. Calls will fail.")
 
     async def create_customer(
         self,
