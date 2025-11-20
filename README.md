@@ -6,7 +6,7 @@ A flexible and extensible payment library for FastAPI applications supporting mu
 
 ## Features
 
-- **Multiple Payment Providers**: Support for Stripe, PayPal, Adyen, and more
+- **Multiple Payment Providers**: Support for Stripe, PayPal, Adyen, **PayU hosted checkout**, and more
 - **Flexible Pricing Models**: 
   - Subscription
   - Usage-based
@@ -78,6 +78,47 @@ Create a `payment_config.json` file:
   "default_provider": "stripe"
 }
 ```
+
+### PayU Hosted Checkout
+
+To enable PayU hosted checkout add a `payu` provider:
+
+```json
+"providers": {
+  "payu": {
+    "api_key": "your_merchant_key",
+    "api_secret": "your_merchant_salt",
+    "sandbox_mode": true,
+    "additional_settings": {
+      "success_url": "https://merchant.test/payu/success",
+      "failure_url": "https://merchant.test/payu/failure",
+      "cancel_url": "https://merchant.test/payu/cancel"
+    }
+  }
+}
+```
+
+When calling `POST /payments` include the hosted checkout fields inside `meta_info` so the library can prepare the HTML form payload:
+
+```json
+{
+  "customer_id": "cust_123",
+  "amount": 10.0,
+  "currency": "INR",
+  "meta_info": {
+    "payu": {
+      "firstname": "John",
+      "email": "john@example.com",
+      "phone": "9999999999",
+      "productinfo": "Order #1001",
+      "surl": "https://merchant.test/payu/success",
+      "furl": "https://merchant.test/payu/failure"
+    }
+  }
+}
+```
+
+The payment response includes `meta_info.provider_data.payu.redirect` containing the action URL and signed fields for rendering the hosted form. Webhooks posted by PayU can be sent using either JSON or form-encoded bodies and are verified automatically via the published hash logic.
 
 ## Documentation
 

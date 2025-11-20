@@ -774,6 +774,16 @@ class PaymentService:
             raise ValueError(
                 f"Customer not found for provider {provider_name}")
 
+        # Enrich meta info with customer context for providers that need it
+        request_meta_info = dict(meta_info or {})
+        provider_meta_payload = dict(request_meta_info)
+        provider_meta_payload["customer_context"] = {
+            "id": customer.id,
+            "email": customer.email,
+            "name": customer.name,
+            "meta_info": customer.meta_info or {},
+        }
+
         # Process payment with provider
         provider_instance = self.get_provider(provider_name)
         provider_payment = await provider_instance.process_payment(
@@ -782,8 +792,14 @@ class PaymentService:
             provider_customer_id=provider_customer.provider_customer_id,
             payment_method_id=payment_method_id,
             description=description,
-            meta_info=meta_info,
+            meta_info=provider_meta_payload,
         )
+
+        combined_meta_info = dict(request_meta_info)
+        if provider_payment.get("meta_info"):
+            combined_meta_info.setdefault("provider_data", {})
+            combined_meta_info["provider_data"][provider_name] = provider_payment["meta_info"]
+        stored_meta_info = combined_meta_info or None
 
         # Create payment in database
         payment_repo = PaymentRepository(self.db_session)
@@ -796,7 +812,11 @@ class PaymentService:
             status=provider_payment["status"],
             payment_method=payment_method_id,
             error_message=provider_payment.get("error_message"),
-            meta_info={**(meta_info or {}), "description": description},
+            meta_info=(
+                {**stored_meta_info, "description": description}
+                if stored_meta_info
+                else ({"description": description} if description else None)
+            ),
         )
 
         # Publish event
@@ -830,6 +850,7 @@ class PaymentService:
             "provider": payment.provider,
             "provider_payment_id": payment.provider_payment_id,
             "created_at": payment.created_at.isoformat(),
+            "meta_info": payment.meta_info,
         }
 
     async def refund_payment(

@@ -164,3 +164,4 @@ class PaymentResponse(BaseModel):
     provider: str
     provider_payment_id: str
     created_at: str
+    meta_info: Optional[Dict[str, Any]] = None

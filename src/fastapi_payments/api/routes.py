@@ -1,3 +1,6 @@
+import json
+import logging
+from urllib.parse import parse_qsl
 from fastapi import (
     APIRouter,
     Depends,
@@ -10,7 +13,6 @@ from fastapi import (
 )
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field, EmailStr
-import logging
 
 from ..schemas.payment import (
     CustomerCreate,
@@ -232,7 +234,16 @@ async def handle_webhook(
 ) -> Dict[str, Any]:
     """Handle webhooks from payment providers."""
     try:
-        payload = await request.json()
+        body_bytes = await request.body()
+        payload: Dict[str, Any]
+        if body_bytes:
+            body_text = body_bytes.decode()
+            try:
+                payload = json.loads(body_text)
+            except json.JSONDecodeError:
+                payload = {k: v for k, v in parse_qsl(body_text)}
+        else:
+            payload = {}
         result = await payment_service.handle_webhook(
             provider=provider, payload=payload, signature=signature
         )

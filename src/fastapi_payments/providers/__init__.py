@@ -75,6 +75,11 @@ def get_provider(
                     "Install with 'pip install \"fastapi-payments[adyen]\"'"
                 )
 
+        elif provider_name == "payu":
+            from .payu import PayUProvider
+
+            provider_class = PayUProvider
+
         else:
             raise ValueError(f"Unsupported payment provider: {provider_name}")
 

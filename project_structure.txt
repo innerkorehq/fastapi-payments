@@ -17,7 +17,8 @@ fastapi-payments/
 │       │   ├── base.py
 │       │   ├── stripe.py
 │       │   ├── paypal.py
-│       │   └── adyen.py
+│       │   ├── adyen.py
+│       │   └── payu.py
 │       ├── pricing/
 │       │   ├── __init__.py
 │       │   ├── base.py
@@ -48,10 +49,13 @@ fastapi-payments/
 │           ├── __init__.py
 │           ├── exceptions.py
 │           └── helpers.py
-├──tests/
+├── tests/
     ├── __init__.py
     ├── conftest.py                # Test fixtures and configuration
     ├── test_config.py             # Configuration tests
+    ├── test_api.py                # API endpoint tests
+    ├── test_integration.py        # Integration tests
+    ├── test_payu_provider.py      # PayU hosted checkout tests
     ├── test_providers/            # Provider tests
     │   ├── __init__.py
     │   ├── test_stripe.py
@@ -66,5 +70,7 @@ fastapi-payments/
     │   ├── test_freemium.py
     │   ├── test_dynamic.py
     │   └── test_hybrid.py
-    ├── test_api.py                # API endpoint tests
-    └── test_integration.py        # Integration tests
+    └── test_utils/                # Utility tests
+        ├── __init__.py
+        ├── test_exceptions.py
+        └── test_helpers.py
