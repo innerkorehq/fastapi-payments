@@ -104,8 +104,12 @@ class PaymentEventPublisher:
         broker_type = getattr(self.config, "broker_type",
                               "redis")  # Default to Redis
 
+        if broker_type == "memory":
+            logger.info("Using in-memory broker as requested by config")
+            return InMemoryBroker()
+
         # Try Redis broker first (our default)
-        if broker_type == "redis" or broker_type == "memory":
+        if broker_type == "redis":
             try:
                 broker_module = importlib.import_module("faststream.redis")
                 RedisBroker = broker_module.RedisBroker

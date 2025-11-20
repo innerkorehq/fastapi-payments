@@ -7,6 +7,7 @@ from ..config.config_schema import PaymentConfig
 from ..providers import get_provider
 from ..messaging.publishers import PaymentEventPublisher, PaymentEvents
 from ..db.repositories import (
+    BaseRepository,
     CustomerRepository,
     PaymentRepository,
     SubscriptionRepository,
@@ -185,6 +186,63 @@ class PaymentService:
                 for pc in customer.provider_customers
             ],
         }
+
+    async def list_customers(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        search: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List customers stored in the service database."""
+
+        if not self.db_session:
+            raise RuntimeError("Database session not set")
+
+        customer_repo = CustomerRepository(self.db_session)
+        customers = await customer_repo.list(
+            limit=limit,
+            offset=offset,
+            search=search,
+            include_provider_customers=True,
+        )
+
+        results: List[Dict[str, Any]] = []
+        for customer in customers:
+            default_provider_link = next(
+                (
+                    pc
+                    for pc in customer.provider_customers
+                    if pc.provider == self.default_provider
+                ),
+                None,
+            )
+            results.append(
+                {
+                    "id": customer.id,
+                    "email": customer.email,
+                    "name": customer.name,
+                    "meta_info": customer.meta_info,
+                    "created_at": customer.created_at.isoformat(),
+                    "updated_at": customer.updated_at.isoformat()
+                    if customer.updated_at
+                    else None,
+                    "provider_customer_id": (
+                        default_provider_link.provider_customer_id
+                        if default_provider_link
+                        else None
+                    ),
+                    "provider_customers": [
+                        {
+                            "provider": pc.provider,
+                            "provider_customer_id": pc.provider_customer_id,
+                        }
+                        for pc in customer.provider_customers
+                    ],
+                }
+            )
+
+        return results
 
     async def update_customer(self, customer_id: str, **kwargs) -> Dict[str, Any]:
         """
@@ -389,6 +447,35 @@ class PaymentService:
             "created_at": product.created_at.isoformat(),
         }
 
+    async def list_products(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Return products stored in the local database."""
+
+        if not self.db_session:
+            raise RuntimeError("Database session not set")
+
+        products = await self.product_repo.list(limit=limit, offset=offset)
+        results: List[Dict[str, Any]] = []
+        for product in products:
+            meta_info = product.meta_info or {}
+            results.append(
+                {
+                    "id": product.id,
+                    "name": product.name,
+                    "description": product.description,
+                    "active": product.active,
+                    "provider_product_id": meta_info.get("provider_product_id", ""),
+                    "provider": meta_info.get("provider", self.default_provider),
+                    "created_at": product.created_at.isoformat(),
+                    "meta_info": meta_info or None,
+                }
+            )
+        return results
+
     async def create_plan(
         self,
         product_id: str,
@@ -491,6 +578,51 @@ class PaymentService:
             "provider_price_id": provider_price["provider_price_id"],
             "created_at": plan.created_at.isoformat(),
         }
+
+    async def list_plans(
+        self,
+        *,
+        product_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Return plans, optionally filtered by product."""
+
+        if not self.db_session:
+            raise RuntimeError("Database session not set")
+
+        plans = await self.plan_repo.list(
+            product_id=product_id, limit=limit, offset=offset
+        )
+
+        results: List[Dict[str, Any]] = []
+        for plan in plans:
+            meta_info = plan.meta_info or {}
+            pricing_model = (
+                plan.pricing_model.value
+                if hasattr(plan.pricing_model, "value")
+                else plan.pricing_model
+            )
+            results.append(
+                {
+                    "id": plan.id,
+                    "product_id": plan.product_id,
+                    "name": plan.name,
+                    "description": plan.description,
+                    "pricing_model": pricing_model,
+                    "amount": plan.amount,
+                    "currency": plan.currency,
+                    "billing_interval": plan.billing_interval,
+                    "billing_interval_count": plan.billing_interval_count,
+                    "trial_period_days": plan.trial_period_days,
+                    "provider": meta_info.get("provider", self.default_provider),
+                    "provider_price_id": meta_info.get("provider_price_id", ""),
+                    "created_at": plan.created_at.isoformat(),
+                    "meta_info": meta_info or None,
+                }
+            )
+
+        return results
 
     async def create_subscription(
         self,
@@ -676,6 +808,56 @@ class PaymentService:
             "created_at": subscription.created_at.isoformat(),
             "provider_data": provider_subscription,
         }
+
+    async def list_subscriptions(
+        self,
+        *,
+        customer_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Return subscriptions filtered by optional criteria."""
+
+        if not self.db_session:
+            raise RuntimeError("Database session not set")
+
+        subscriptions = await self.subscription_repo.list(
+            customer_id=customer_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+            include_plan=True,
+        )
+
+        results: List[Dict[str, Any]] = []
+        for subscription in subscriptions:
+            provider_data = None
+            if subscription.meta_info:
+                provider_data = subscription.meta_info.get("provider_data")
+            results.append(
+                {
+                    "id": subscription.id,
+                    "customer_id": subscription.customer_id,
+                    "plan_id": subscription.plan_id,
+                    "plan_name": subscription.plan.name if subscription.plan else None,
+                    "provider": subscription.provider,
+                    "provider_subscription_id": subscription.provider_subscription_id,
+                    "status": subscription.status,
+                    "quantity": subscription.quantity,
+                    "current_period_start": subscription.current_period_start.isoformat()
+                    if subscription.current_period_start
+                    else None,
+                    "current_period_end": subscription.current_period_end.isoformat()
+                    if subscription.current_period_end
+                    else None,
+                    "cancel_at_period_end": subscription.cancel_at_period_end,
+                    "created_at": subscription.created_at.isoformat(),
+                    "provider_data": provider_data,
+                }
+            )
+
+        return results
 
     async def cancel_subscription(
         self, subscription_id: str, cancel_at_period_end: bool = True
@@ -917,6 +1099,51 @@ class PaymentService:
             "created_at": payment.created_at.isoformat(),
         }
 
+    async def list_payments(
+        self,
+        *,
+        customer_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Return payments filtered by optional criteria."""
+
+        if not self.db_session:
+            raise RuntimeError("Database session not set")
+
+        payments = await self.payment_repo.list(
+            customer_id=customer_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+            include_customer=True,
+        )
+
+        results: List[Dict[str, Any]] = []
+        for payment in payments:
+            status_value = (
+                payment.status.value if hasattr(payment.status, "value") else payment.status
+            )
+            results.append(
+                {
+                    "id": payment.id,
+                    "customer_id": payment.customer_id,
+                    "amount": payment.amount,
+                    "refunded_amount": payment.refunded_amount,
+                    "currency": payment.currency,
+                    "status": status_value,
+                    "payment_method": payment.payment_method,
+                    "error_message": payment.error_message,
+                    "provider": payment.provider,
+                    "provider_payment_id": payment.provider_payment_id,
+                    "created_at": payment.created_at.isoformat(),
+                    "meta_info": payment.meta_info,
+                }
+            )
+
+        return results
+
     async def record_usage(
         self,
         subscription_id: str,
@@ -1040,25 +1267,6 @@ class PaymentService:
         )
 
         return result
-
-    # Add the dependency injection function
-    async def get_customer(self, customer_id: str) -> Optional[Dict[str, Any]]:
-        """Get customer details by ID."""
-        if hasattr(self, "customer_repo"):
-            customer = await self.customer_repo.get_by_id(customer_id)
-            if customer:
-                provider_customers = await self.customer_repo.get_provider_customers(
-                    customer_id
-                )
-                return {
-                    "id": customer.id,
-                    "email": customer.email,
-                    "name": customer.name,
-                    "created_at": customer.created_at.isoformat(),
-                    "provider_customers": provider_customers,
-                }
-        return None
-
 
 # Add the dependency injection function
 def get_payment_service():

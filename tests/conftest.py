@@ -1,8 +1,10 @@
+import asyncio
+from datetime import datetime, timezone
+from pathlib import Path
+
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
-import asyncio
-from datetime import datetime, timezone
 
 from fastapi_payments import FastAPIPayments
 from fastapi_payments.config.config_schema import PaymentConfig, DatabaseConfig
@@ -15,6 +17,11 @@ from fastapi_payments.api.dependencies import (
 )
 from fastapi_payments.db.repositories import initialize_db
 
+# Paths
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_TEST_DB_PATH = _REPO_ROOT / "test_payments.db"
+
+
 # Test configuration
 TEST_CONFIG = {
     "providers": {
@@ -24,7 +31,10 @@ TEST_CONFIG = {
             "sandbox_mode": True,
         }
     },
-    "database": {"url": "sqlite+aiosqlite:///:memory:", "echo": True},
+    "database": {
+        "url": f"sqlite+aiosqlite:///{_TEST_DB_PATH.as_posix()}",
+        "echo": False,
+    },
     "messaging": {
         "broker_type": "memory",
         "url": "memory://",
@@ -42,6 +52,8 @@ def initialize_test_dependencies():
     initialize_dependencies(config)
 
     # Initialize database
+    if _TEST_DB_PATH.exists():
+        _TEST_DB_PATH.unlink()
     db_config = DatabaseConfig(**TEST_CONFIG["database"])
     initialize_db(db_config)
 

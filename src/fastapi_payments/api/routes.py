@@ -37,6 +37,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["payments"])
 
 
+@router.get("/customers", response_model=List[CustomerResponse])
+async def list_customers(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: Optional[str] = Query(None, description="Search by name or email"),
+    payment_service: PaymentService = Depends(get_payment_service_with_db),
+) -> List[Dict[str, Any]]:
+    """Return stored customers."""
+
+    return await payment_service.list_customers(
+        limit=limit, offset=offset, search=search
+    )
+
+
 @router.post("/customers", response_model=CustomerResponse)
 async def create_customer(
     customer: CustomerCreate,
@@ -97,6 +111,17 @@ async def list_payment_methods(
     return result
 
 
+@router.get("/products", response_model=List[ProductResponse])
+async def list_products(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    payment_service: PaymentService = Depends(get_payment_service_with_db),
+) -> List[Dict[str, Any]]:
+    """Return stored products."""
+
+    return await payment_service.list_products(limit=limit, offset=offset)
+
+
 @router.post("/products", response_model=ProductResponse)
 async def create_product(
     product: ProductCreate,
@@ -112,6 +137,38 @@ async def create_product(
         return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/plans", response_model=List[PlanResponse])
+async def list_plans(
+    product_id: Optional[str] = Query(
+        None, description="Filter plans for a specific product"
+    ),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    payment_service: PaymentService = Depends(get_payment_service_with_db),
+) -> List[Dict[str, Any]]:
+    """Return price plans."""
+
+    return await payment_service.list_plans(
+        product_id=product_id, limit=limit, offset=offset
+    )
+
+
+@router.get(
+    "/products/{product_id}/plans", response_model=List[PlanResponse]
+)
+async def list_product_plans(
+    product_id: str,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    payment_service: PaymentService = Depends(get_payment_service_with_db),
+) -> List[Dict[str, Any]]:
+    """Return plans belonging to a product."""
+
+    return await payment_service.list_plans(
+        product_id=product_id, limit=limit, offset=offset
+    )
 
 
 @router.post("/products/{product_id}/plans", response_model=PlanResponse)
@@ -137,6 +194,44 @@ async def create_plan(
         return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/subscriptions", response_model=List[SubscriptionResponse])
+async def list_subscriptions(
+    customer_id: Optional[str] = Query(
+        None, description="Filter by customer ID"
+    ),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    payment_service: PaymentService = Depends(get_payment_service_with_db),
+) -> List[Dict[str, Any]]:
+    """Return subscriptions."""
+
+    return await payment_service.list_subscriptions(
+        customer_id=customer_id,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/customers/{customer_id}/subscriptions", response_model=List[SubscriptionResponse]
+)
+async def list_customer_subscriptions(
+    customer_id: str,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    payment_service: PaymentService = Depends(get_payment_service_with_db),
+) -> List[Dict[str, Any]]:
+    """Return subscriptions for a specific customer."""
+
+    return await payment_service.list_subscriptions(
+        customer_id=customer_id,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post(
@@ -187,6 +282,26 @@ async def cancel_subscription(
         return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/payments", response_model=List[PaymentResponse])
+async def list_payments(
+    customer_id: Optional[str] = Query(
+        None, description="Filter by customer ID"
+    ),
+    status: Optional[str] = Query(None, description="Filter by payment status"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    payment_service: PaymentService = Depends(get_payment_service_with_db),
+) -> List[Dict[str, Any]]:
+    """Return processed payments."""
+
+    return await payment_service.list_payments(
+        customer_id=customer_id,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("/payments", response_model=PaymentResponse)

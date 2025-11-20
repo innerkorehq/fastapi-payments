@@ -1,10 +1,13 @@
 """Database repositories package."""
 
+import asyncio
 from typing import Optional, AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, AsyncEngine
 from sqlalchemy.orm import sessionmaker
 
 from ...config.config_schema import DatabaseConfig
+from ..models import Base
+from .base import BaseRepository
 from .customer_repository import CustomerRepository
 from .payment_repository import PaymentRepository
 from .subscription_repository import SubscriptionRepository
@@ -37,7 +40,32 @@ def initialize_db(config: DatabaseConfig) -> AsyncEngine:
     _sessionmaker = sessionmaker(
         _engine, class_=AsyncSession, expire_on_commit=False)
 
+    # Ensure schema exists immediately (covers sync + async contexts)
+    _create_schema_sync(_engine)
+
     return _engine
+
+
+def _create_schema_sync(engine: AsyncEngine) -> None:
+    """Create database schema using the async engine from any context."""
+
+    async def _create_schema():
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_create_schema())
+        return
+
+    # If we get here an event loop is already running, so fall back to a
+    # dedicated loop to avoid RuntimeError from asyncio.run.
+    new_loop = asyncio.new_event_loop()
+    try:
+        new_loop.run_until_complete(_create_schema())
+    finally:
+        new_loop.close()
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -61,6 +89,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 __all__ = [
     "initialize_db",
     "get_db",
+    "BaseRepository",
     "CustomerRepository",
     "PaymentRepository",
     "SubscriptionRepository",

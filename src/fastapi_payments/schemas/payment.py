@@ -11,6 +11,14 @@ class CustomerCreate(BaseModel):
     meta_info: Optional[Dict[str, Any]] = None
 
 
+class ProviderCustomerInfo(BaseModel):
+    """Represents a mapping between a customer and provider."""
+
+    provider: str
+    provider_customer_id: str
+    provider_data: Optional[Dict[str, Any]] = None
+
+
 class CustomerResponse(BaseModel):
     """Schema for customer response."""
 
@@ -19,8 +27,9 @@ class CustomerResponse(BaseModel):
     name: Optional[str] = None
     meta_info: Optional[Dict[str, Any]] = None
     created_at: str
+    updated_at: Optional[str] = None
     provider_customer_id: Optional[str] = None
-    provider_customers: Optional[List[Dict[str, Any]]] = None
+    provider_customers: Optional[List[ProviderCustomerInfo]] = None
 
 
 class PaymentMethodCreate(BaseModel):
@@ -40,6 +49,7 @@ class PaymentMethodResponse(BaseModel):
     type: str
     is_default: bool = False
     card: Optional[Dict[str, Any]] = None
+    created_at: Optional[str] = None
 
 
 class ProductCreate(BaseModel):
@@ -110,6 +120,7 @@ class PlanResponse(BaseModel):
     provider: str
     provider_price_id: str
     created_at: str
+    meta_info: Optional[Dict[str, Any]] = None
 
 
 class SubscriptionCreate(BaseModel):
