@@ -141,16 +141,28 @@ class StripeProvider(PaymentProvider):
         params = dict(payment_details)
         params.setdefault("type", self.default_payment_method_type)
         attach_behavior = params.pop("set_default", True)
+        
+        # Check if payment_method_id is provided (for attaching existing payment method)
+        payment_method_id = params.pop("payment_method_id", None)
+        
+        if payment_method_id:
+            # Attach existing payment method
+            payment_method = await self._call_stripe(
+                self.stripe.PaymentMethod.attach,
+                payment_method_id,
+                customer=provider_customer_id,
+            )
+        else:
+            # Create new payment method
+            payment_method = await self._call_stripe(
+                self.stripe.PaymentMethod.create, **params
+            )
 
-        payment_method = await self._call_stripe(
-            self.stripe.PaymentMethod.create, **params
-        )
-
-        await self._call_stripe(
-            self.stripe.PaymentMethod.attach,
-            payment_method["id"],
-            customer=provider_customer_id,
-        )
+            await self._call_stripe(
+                self.stripe.PaymentMethod.attach,
+                payment_method["id"],
+                customer=provider_customer_id,
+            )
 
         if attach_behavior:
             await self._call_stripe(
