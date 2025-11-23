@@ -40,9 +40,8 @@ def initialize_db(config: DatabaseConfig) -> AsyncEngine:
     _sessionmaker = sessionmaker(
         _engine, class_=AsyncSession, expire_on_commit=False)
 
-    # Ensure schema exists immediately (covers sync + async contexts)
-    _create_schema_sync(_engine)
-
+    # Defer schema creation to avoid event loop issues in multiprocessing
+    # Schema will be created on first database access
     return _engine
 
 
@@ -55,17 +54,24 @@ def _create_schema_sync(engine: AsyncEngine) -> None:
 
     try:
         loop = asyncio.get_running_loop()
+        # If we're in a running loop, try to run the task in it
+        if loop.is_running():
+            # Schedule the task and wait for it
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, _create_schema())
+                future.result()  # Wait for completion
+        else:
+            loop.run_until_complete(_create_schema())
     except RuntimeError:
+        # No loop running, use asyncio.run
         asyncio.run(_create_schema())
-        return
 
-    # If we get here an event loop is already running, so fall back to a
-    # dedicated loop to avoid RuntimeError from asyncio.run.
-    new_loop = asyncio.new_event_loop()
-    try:
-        new_loop.run_until_complete(_create_schema())
-    finally:
-        new_loop.close()
+
+async def _create_schema_async(engine: AsyncEngine) -> None:
+    """Create database schema asynchronously."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -77,6 +83,11 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
     if _sessionmaker is None:
         raise RuntimeError("Database not initialized")
+
+    # Create schema on first access if not already done
+    if not hasattr(get_db, '_schema_created'):
+        await _create_schema_async(_engine)
+        get_db._schema_created = True
 
     async with _sessionmaker() as session:
         try:

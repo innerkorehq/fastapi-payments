@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fastapi-payments"
-version = "0.1.1"
+version = "0.1.3"
 description = "A flexible and extensible payment library for FastAPI"
 readme = "README.md"
 requires-python = ">=3.8"

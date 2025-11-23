@@ -36,7 +36,7 @@ class FastAPIPayments:
             self.logger.info("Database initialized successfully")
         except Exception as e:
             self.logger.error(f"Error initializing database: {str(e)}")
-            if self.config.debug_mode:
+            if self.config.debug:
                 raise
 
         self.logger.info("FastAPI Payments initialized")

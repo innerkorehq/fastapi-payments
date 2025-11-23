@@ -85,3 +85,4 @@ $RECYCLE.BIN/
 config.local.json
 config.dev.json
 
+test_payments.db

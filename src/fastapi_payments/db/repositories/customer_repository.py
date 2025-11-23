@@ -60,7 +60,10 @@ class CustomerRepository:
     async def get_provider_customers(self, customer_id: str) -> List[ProviderCustomer]:
         stmt = select(ProviderCustomer).where(ProviderCustomer.customer_id == customer_id)
         result = await self.session.execute(stmt)
-        return result.scalars().all()
+        # When joined eager-loading against collections, SQLAlchemy returns
+        # duplicate parent rows; calling `unique()` on the result collapses
+        # duplicate parent objects so `.scalars()` returns unique entities.
+        return result.unique().scalars().all()
 
     async def get_with_provider_customers(self, customer_id: str) -> Optional[Customer]:
         stmt = (
@@ -69,7 +72,9 @@ class CustomerRepository:
             .where(Customer.id == customer_id)
         )
         result = await self.session.execute(stmt)
-        return result.scalars().first()
+        # The same `unique()` is required when joined-loading collections
+        # to ensure a single Customer instance is returned.
+        return result.unique().scalars().first()
 
     async def get_provider_customer(
         self, customer_id: str, provider: str
@@ -111,4 +116,6 @@ class CustomerRepository:
             stmt = stmt.limit(limit)
 
         result = await self.session.execute(stmt)
-        return result.scalars().all()
+        # Call unique() because we often joinload the provider_customers
+        # collection which causes duplicated parent rows for Customers.
+        return result.unique().scalars().all()

@@ -23,6 +23,7 @@ deps:
 
 build: clean
 	@echo "Building package..."
+	$(PYTHON) -m pip install --quiet --user --break-system-packages build
 	$(PYTHON) -m build
 
 test:

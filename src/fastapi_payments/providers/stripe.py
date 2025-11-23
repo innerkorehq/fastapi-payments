@@ -1,8 +1,12 @@
 """Stripe payment provider implementation."""
 
+import asyncio
+import inspect
+import json
 import logging
-from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Any, Dict, List, Optional
 
 from .base import PaymentProvider
 
@@ -10,44 +14,77 @@ logger = logging.getLogger(__name__)
 
 
 class StripeProvider(PaymentProvider):
-    """Stripe payment provider."""
+    """Stripe payment provider backed by the official SDK."""
+
+    ZERO_DECIMAL_CURRENCIES = {
+        "BIF",
+        "CLP",
+        "DJF",
+        "GNF",
+        "JPY",
+        "KMF",
+        "KRW",
+        "MGA",
+        "PYG",
+        "RWF",
+        "UGX",
+        "VND",
+        "VUV",
+        "XAF",
+        "XOF",
+        "XPF",
+    }
+
+    EVENT_TYPE_MAP = {
+        "payment_intent.succeeded": "payment.succeeded",
+        "payment_intent.payment_failed": "payment.failed",
+        "invoice.payment_failed": "invoice.payment_failed",
+        "invoice.payment_succeeded": "invoice.payment_succeeded",
+        "customer.subscription.created": "subscription.created",
+        "customer.subscription.updated": "subscription.updated",
+        "customer.subscription.deleted": "subscription.canceled",
+        "charge.refunded": "payment.refunded",
+    }
 
     def initialize(self):
         """Initialize Stripe with configuration."""
         self.api_key = self.config.api_key
         self.webhook_secret = getattr(self.config, "webhook_secret", None)
         self.sandbox_mode = getattr(self.config, "sandbox_mode", True)
+        additional_settings = getattr(self.config, "additional_settings", {}) or {}
+        self.api_version = additional_settings.get("api_version", "2023-10-16")
+        self.max_network_retries = additional_settings.get("max_network_retries")
+        self.default_payment_method_type = additional_settings.get(
+            "payment_method_type", "card"
+        )
+        self.default_usage_action = additional_settings.get("usage_action", "increment")
+        self.default_payment_behavior = additional_settings.get(
+            "payment_behavior", "allow_incomplete"
+        )
 
-        # For testing, we'll just use a simple mock implementation
-        # In a real implementation, we'd import and configure the Stripe SDK
-        if hasattr(self.config, "additional_settings"):
-            self.api_version = self.config.additional_settings.get(
-                "api_version", "2023-10-16"
-            )
-        else:
-            self.api_version = "2023-10-16"
+        logger.info(
+            "Initialized Stripe provider with API version %s", self.api_version
+        )
 
-        logger.info(f"Initialized Stripe provider with API version {self.api_version}")
+        self.stripe = None
+        self.stripe_error = None
+        self._run_stripe_calls_in_thread = True
 
-        # Always try to import the Stripe SDK when available
-        self.using_real_sdk = False
         try:
             import stripe
+
             stripe.api_key = self.api_key
             stripe.api_version = self.api_version
+            if self.max_network_retries is not None:
+                stripe.max_network_retries = self.max_network_retries
+
             self.stripe = stripe
-            self.using_real_sdk = True
+            self.stripe_error = getattr(stripe, "error", None)
             logger.info("Using real Stripe SDK")
         except ImportError:
             logger.warning(
                 "Stripe package not installed. Install with 'pip install stripe'"
             )
-            self.stripe = None
-
-        if self.sandbox_mode:
-            logger.info("Running in sandbox mode: using mock implementations for API calls")
-        elif not self.using_real_sdk:
-            logger.warning("Not in sandbox mode but Stripe SDK not available. Calls will fail.")
 
     async def create_customer(
         self,
@@ -56,100 +93,95 @@ class StripeProvider(PaymentProvider):
         meta_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a customer in Stripe."""
-        # For testing, return mock data
-        customer_id = f"cus_mock_{hash(email) % 10000:04d}"
-        created_at = datetime.now(timezone.utc)
-
-        logger.info(f"Created Stripe customer {customer_id} for {email}")
-
-        return {
-            "provider_customer_id": customer_id,
-            "email": email,
-            "name": name,
-            "created_at": created_at.isoformat(),
-            "meta_info": meta_info or {},
-        }
+        metadata = self._prepare_metadata(meta_info)
+        params: Dict[str, Any] = {"email": email, "name": name}
+        if metadata:
+            params["metadata"] = metadata
+        customer = await self._call_stripe(self.stripe.Customer.create, **params)
+        return self._format_customer(customer)
 
     async def retrieve_customer(self, provider_customer_id: str) -> Dict[str, Any]:
         """Retrieve customer from Stripe."""
-        # For testing, return mock data
-        return {
-            "provider_customer_id": provider_customer_id,
-            "email": f"customer_{provider_customer_id}@example.com",
-            "name": f"Customer {provider_customer_id}",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "meta_info": {},
-        }
+        customer = await self._call_stripe(
+            self.stripe.Customer.retrieve, provider_customer_id
+        )
+        return self._format_customer(customer)
 
     async def update_customer(
         self, provider_customer_id: str, data: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Update customer data in Stripe."""
-        # For testing, return mock data
-        return {
-            "provider_customer_id": provider_customer_id,
-            "email": data.get("email", f"customer_{provider_customer_id}@example.com"),
-            "name": data.get("name", f"Customer {provider_customer_id}"),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "meta_info": data.get("meta_info", {}),
-        }
+        payload: Dict[str, Any] = {}
+        if "email" in data:
+            payload["email"] = data["email"]
+        if "name" in data:
+            payload["name"] = data["name"]
+        if data.get("meta_info"):
+            payload["metadata"] = self._prepare_metadata(data["meta_info"])
+
+        customer = await self._call_stripe(
+            self.stripe.Customer.modify, provider_customer_id, **payload
+        )
+        normalized = self._format_customer(customer)
+        normalized["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return normalized
 
     async def delete_customer(self, provider_customer_id: str) -> Dict[str, Any]:
         """Delete a customer from Stripe."""
-        # For testing, return success
-        return {"deleted": True, "provider_customer_id": provider_customer_id}
+        response = await self._call_stripe(
+            self.stripe.Customer.delete, provider_customer_id
+        )
+        deleted = bool(self._to_plain_dict(response).get("deleted", False))
+        return {"deleted": deleted, "provider_customer_id": provider_customer_id}
 
     async def create_payment_method(
         self, provider_customer_id: str, payment_details: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Create a payment method in Stripe."""
-        # For testing, return mock data with specific values tests expect
-        payment_method_id = "pm_test_123456789"
+        """Create a payment method in Stripe and attach it to the customer."""
+        params = dict(payment_details)
+        params.setdefault("type", self.default_payment_method_type)
+        attach_behavior = params.pop("set_default", True)
 
-        result = {
-            "payment_method_id": payment_method_id,
-            "type": payment_details.get("type", "card"),
-            "provider": "stripe",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
+        payment_method = await self._call_stripe(
+            self.stripe.PaymentMethod.create, **params
+        )
 
-        if payment_details.get("type") == "card" and payment_details.get("card"):
-            result["card"] = {
-                "brand": "visa",
-                "last4": "4242",
-                "exp_month": 12,
-                "exp_year": 2030,
-            }
+        await self._call_stripe(
+            self.stripe.PaymentMethod.attach,
+            payment_method["id"],
+            customer=provider_customer_id,
+        )
 
-        return result
+        if attach_behavior:
+            await self._call_stripe(
+                self.stripe.Customer.modify,
+                provider_customer_id,
+                invoice_settings={"default_payment_method": payment_method["id"]},
+            )
+
+        return self._format_payment_method(payment_method)
 
     async def list_payment_methods(
         self, provider_customer_id: str
     ) -> List[Dict[str, Any]]:
         """List payment methods for a customer in Stripe."""
-        # For testing, return mock data
-        payment_method_id = f"pm_mock_{hash(provider_customer_id) % 10000:04d}"
-
-        return [
-            {
-                "payment_method_id": payment_method_id,
-                "type": "card",
-                "provider": "stripe",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "card": {
-                    "brand": "visa",
-                    "last4": "4242",
-                    "exp_month": 12,
-                    "exp_year": 2030,
-                },
-            }
-        ]
+        payment_method_type = self.default_payment_method_type
+        response = await self._call_stripe(
+            self.stripe.PaymentMethod.list,
+            customer=provider_customer_id,
+            type=payment_method_type,
+        )
+        items = self._to_plain_dict(response).get("data", [])
+        return [self._format_payment_method(pm) for pm in items]
 
     async def delete_payment_method(self, payment_method_id: str) -> Dict[str, Any]:
-        """Delete a payment method from Stripe."""
-        # For testing, return success
-        return {"deleted": True, "payment_method_id": payment_method_id}
+        """Detach a payment method from Stripe."""
+        response = await self._call_stripe(
+            self.stripe.PaymentMethod.detach, payment_method_id
+        )
+        data = self._to_plain_dict(response)
+        deleted = data.get("customer") is None
+        return {"deleted": deleted, "payment_method_id": payment_method_id}
 
     async def create_product(
         self,
@@ -158,17 +190,12 @@ class StripeProvider(PaymentProvider):
         meta_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a product in Stripe."""
-        # For testing, return mock data
-        product_id = f"prod_mock_{hash(name) % 10000:04d}"
-
-        return {
-            "provider_product_id": product_id,
-            "name": name,
-            "description": description,
-            "active": True,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "meta_info": meta_info or {},
-        }
+        metadata = self._prepare_metadata(meta_info)
+        params: Dict[str, Any] = {"name": name, "description": description, "active": True}
+        if metadata:
+            params["metadata"] = metadata
+        product = await self._call_stripe(self.stripe.Product.create, **params)
+        return self._format_product(product)
 
     async def create_price(
         self,
@@ -180,25 +207,22 @@ class StripeProvider(PaymentProvider):
         meta_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a price in Stripe."""
-        # For testing, return mock data
-        price_id = f"price_mock_{hash(product_id + currency) % 10000:04d}"
-
-        result = {
-            "provider_price_id": price_id,
-            "product_id": product_id,
-            "amount": amount,
-            "currency": currency,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "meta_info": meta_info or {},
+        params: Dict[str, Any] = {
+            "product": product_id,
+            "unit_amount": self._to_stripe_amount(amount, currency),
+            "currency": currency.lower(),
         }
-
+        metadata = self._prepare_metadata(meta_info)
+        if metadata:
+            params["metadata"] = metadata
         if interval:
-            result["recurring"] = {
+            params["recurring"] = {
                 "interval": interval,
                 "interval_count": interval_count or 1,
             }
 
-        return result
+        price = await self._call_stripe(self.stripe.Price.create, **params)
+        return self._format_price(price)
 
     async def create_subscription(
         self,
@@ -209,83 +233,78 @@ class StripeProvider(PaymentProvider):
         meta_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a subscription in Stripe."""
-        # For testing, return mock data with predictable values
-        subscription_id = "sub_test_123456789"
-        created_at = datetime.now(timezone.utc)
-
-        return {
-            "provider_subscription_id": subscription_id,
-            "customer_id": provider_customer_id,
-            "price_id": price_id,
-            "status": "active",
-            "quantity": quantity,
-            "current_period_start": created_at.isoformat(),
-            "current_period_end": datetime.fromtimestamp(
-                created_at.timestamp() + 30 * 24 * 60 * 60, tz=timezone.utc
-            ).isoformat(),
-            "cancel_at_period_end": False,
-            "created_at": created_at.isoformat(),
-            "meta_info": meta_info or {},
+        params: Dict[str, Any] = {
+            "customer": provider_customer_id,
+            "items": [{"price": price_id, "quantity": quantity}],
+            "payment_behavior": self.default_payment_behavior,
+            "expand": ["latest_invoice.payment_intent"],
         }
+        metadata = self._prepare_metadata(meta_info)
+        if metadata:
+            params["metadata"] = metadata
+        if trial_period_days:
+            params["trial_period_days"] = trial_period_days
+
+        subscription = await self._call_stripe(
+            self.stripe.Subscription.create, **params
+        )
+        return self._format_subscription(subscription)
 
     async def retrieve_subscription(
         self, provider_subscription_id: str
     ) -> Dict[str, Any]:
         """Retrieve subscription details from Stripe."""
-        # For testing, return mock data
-        created_at = datetime.now(timezone.utc)
-
-        return {
-            "provider_subscription_id": provider_subscription_id,
-            "customer_id": f"cus_mock_{hash(provider_subscription_id) % 10000:04d}",
-            "price_id": f"price_mock_{hash(provider_subscription_id) % 10000:04d}",
-            "status": "active",
-            "quantity": 1,
-            "current_period_start": created_at.isoformat(),
-            "current_period_end": datetime.fromtimestamp(
-                created_at.timestamp() + 30 * 24 * 60 * 60, tz=timezone.utc
-            ).isoformat(),
-            "cancel_at_period_end": False,
-            "created_at": created_at.isoformat(),
-        }
+        subscription = await self._call_stripe(
+            self.stripe.Subscription.retrieve, provider_subscription_id
+        )
+        return self._format_subscription(subscription)
 
     async def update_subscription(
         self, provider_subscription_id: str, data: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Update subscription in Stripe."""
-        # For testing, return mock data based on update data
-        subscription = await self.retrieve_subscription(provider_subscription_id)
-
-        subscription.update(
-            {
-                "quantity": data.get("quantity", subscription["quantity"]),
-                "meta_info": data.get("meta_info", {}),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
+        current = await self._call_stripe(
+            self.stripe.Subscription.retrieve, provider_subscription_id
         )
+        update_params: Dict[str, Any] = {}
 
-        return subscription
+        if "quantity" in data:
+            items = self._to_plain_dict(current).get("items", {}).get("data", [])
+            if not items:
+                raise ValueError("Subscription has no items to update quantity")
+            update_params["items"] = [
+                {"id": items[0]["id"], "quantity": data["quantity"]}
+            ]
+
+        if data.get("meta_info"):
+            update_params["metadata"] = self._prepare_metadata(data["meta_info"])
+
+        if "cancel_at_period_end" in data:
+            update_params["cancel_at_period_end"] = data["cancel_at_period_end"]
+
+        if not update_params:
+            return self._format_subscription(current)
+
+        updated = await self._call_stripe(
+            self.stripe.Subscription.modify, provider_subscription_id, **update_params
+        )
+        return self._format_subscription(updated)
 
     async def cancel_subscription(
         self, provider_subscription_id: str, cancel_at_period_end: bool = True
     ) -> Dict[str, Any]:
         """Cancel a subscription in Stripe."""
-        # For testing, return mock data
-        subscription = await self.retrieve_subscription(provider_subscription_id)
-
-        subscription.update(
-            {
-                "status": "canceled" if not cancel_at_period_end else "active",
-                "cancel_at_period_end": cancel_at_period_end,
-                "canceled_at": (
-                    datetime.now(timezone.utc).isoformat()
-                    if not cancel_at_period_end
-                    else None
-                ),
-            }
-        )
-
-        return subscription
+        if cancel_at_period_end:
+            subscription = await self._call_stripe(
+                self.stripe.Subscription.modify,
+                provider_subscription_id,
+                cancel_at_period_end=True,
+            )
+        else:
+            subscription = await self._call_stripe(
+                self.stripe.Subscription.delete, provider_subscription_id
+            )
+        return self._format_subscription(subscription)
 
     async def process_payment(
         self,
@@ -296,45 +315,77 @@ class StripeProvider(PaymentProvider):
         description: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Process a one-time payment with Stripe."""
-        # For testing, return mock data with specific testing values
-        payment_id = "pi_test_123456789"
-
-        return {
-            "provider_payment_id": payment_id,
-            "amount": amount,
-            "currency": currency,
-            "status": "succeeded",  # Changed from COMPLETED to succeeded
+        """Process a one-time payment with Stripe using PaymentIntents."""
+        params: Dict[str, Any] = {
+            "amount": self._to_stripe_amount(amount, currency),
+            "currency": currency.lower(),
             "description": description,
-            "payment_method_id": payment_method_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "meta_info": meta_info or {},
         }
+        metadata = self._prepare_metadata(meta_info)
+        if metadata:
+            params["metadata"] = metadata
+        if provider_customer_id:
+            params["customer"] = provider_customer_id
+        if payment_method_id:
+            params["payment_method"] = payment_method_id
+            params["confirm"] = True
+            params.setdefault("off_session", True)
+        else:
+            params["automatic_payment_methods"] = {"enabled": True}
+            params["confirm"] = False
+
+        payment_intent = await self._call_stripe(
+            self.stripe.PaymentIntent.create, **params
+        )
+        return self._format_payment_intent(payment_intent)
 
     async def refund_payment(
         self, provider_payment_id: str, amount: Optional[float] = None
     ) -> Dict[str, Any]:
         """Refund a payment in Stripe."""
-        # For testing, return mock data
-        refund_id = f"re_mock_{hash(provider_payment_id) % 10000:04d}"
+        refund_params: Dict[str, Any] = {"payment_intent": provider_payment_id}
+        refund_currency: Optional[str] = None
 
-        return {
-            "provider_refund_id": refund_id,
-            "payment_id": provider_payment_id,
-            "amount": amount,
-            "status": "succeeded",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
+        if amount is not None:
+            payment_intent = await self._call_stripe(
+                self.stripe.PaymentIntent.retrieve, provider_payment_id
+            )
+            refund_currency = self._to_plain_dict(payment_intent).get("currency", "usd")
+            refund_params["amount"] = self._to_stripe_amount(amount, refund_currency)
+
+        refund = await self._call_stripe(self.stripe.Refund.create, **refund_params)
+        return self._format_refund(refund, refund_currency)
 
     async def webhook_handler(
         self, payload: Dict[str, Any], signature: Optional[str] = None
     ) -> Dict[str, Any]:
         """Handle webhook events from Stripe."""
-        # For testing, return a response with the expected event_type
+        body: str
+        if isinstance(payload, (bytes, bytearray)):
+            body = payload.decode()
+        elif isinstance(payload, str):
+            body = payload
+        else:
+            body = json.dumps(payload)
+
+        if signature:
+            self._ensure_client()
+            if not self.webhook_secret:
+                raise ValueError("Webhook secret not configured for Stripe provider")
+            event = self.stripe.Webhook.construct_event(
+                payload=body, sig_header=signature, secret=self.webhook_secret
+            )
+            event_dict = self._to_plain_dict(event)
+        else:
+            event_dict = json.loads(body)
+
+        event_type = event_dict.get("type", "unknown")
+        standardized = self.EVENT_TYPE_MAP.get(event_type, "payment.updated")
+
         return {
-            "event_type": "payment_intent.succeeded",  # Changed from payment.succeeded
-            "standardized_event_type": "payment.succeeded",
-            "data": payload,
+            "event_type": event_type,
+            "standardized_event_type": standardized,
+            "data": event_dict.get("data", {}),
             "provider": "stripe",
         }
 
@@ -345,14 +396,223 @@ class StripeProvider(PaymentProvider):
         timestamp: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         """Record usage for metered billing with Stripe."""
-        # For testing, return mock data
-        usage_record_id = (
-            f"ur_mock_{hash(subscription_item_id + str(quantity)) % 10000:04d}"
+        ts = int((timestamp or datetime.now(timezone.utc)).timestamp())
+        usage_record = await self._call_stripe(
+            self.stripe.UsageRecord.create,
+            subscription_item=subscription_item_id,
+            quantity=quantity,
+            timestamp=ts,
+            action=self.default_usage_action,
         )
+        return self._format_usage_record(usage_record)
 
+    async def _call_stripe(self, func, *args, **kwargs):
+        """Execute Stripe SDK calls safely from async context."""
+        self._ensure_client()
+        try:
+            if not getattr(self, "_run_stripe_calls_in_thread", True):
+                result = func(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    return await result
+                return result
+
+            return await asyncio.to_thread(func, *args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            self._handle_stripe_error(exc)
+            raise
+
+    def _ensure_client(self) -> None:
+        if not self.stripe:
+            raise RuntimeError(
+                "Stripe SDK is not available. Install the 'stripe' package and configure the provider."
+            )
+
+    def _handle_stripe_error(self, exc: Exception):
+        if self.stripe_error and isinstance(exc, self.stripe_error.StripeError):
+            logger.error("Stripe API error: %s", exc.user_message or str(exc))
+        else:
+            logger.error("Stripe call failed: %s", exc)
+
+    @staticmethod
+    def _timestamp_to_iso(timestamp_value: Optional[int]) -> Optional[str]:
+        if timestamp_value is None:
+            return None
+        return datetime.fromtimestamp(timestamp_value, tz=timezone.utc).isoformat()
+
+    def _to_stripe_amount(self, amount: float, currency: str) -> int:
+        currency_code = currency.upper()
+        quantize_exp = Decimal("1") if currency_code in self.ZERO_DECIMAL_CURRENCIES else Decimal("0.01")
+        scaled = Decimal(str(amount)).quantize(quantize_exp, rounding=ROUND_HALF_UP)
+        factor = Decimal("1") if currency_code in self.ZERO_DECIMAL_CURRENCIES else Decimal("100")
+        return int((scaled * factor).to_integral_value(rounding=ROUND_HALF_UP))
+
+    def _from_stripe_amount(self, amount: Optional[int], currency: str) -> Optional[float]:
+        if amount is None:
+            return None
+        currency_code = currency.upper()
+        if currency_code in self.ZERO_DECIMAL_CURRENCIES:
+            return float(amount)
+        return float(Decimal(amount) / Decimal("100"))
+
+    @staticmethod
+    def _prepare_metadata(meta_info: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+        if not meta_info:
+            return None
+        return {str(key): str(value) for key, value in meta_info.items()}
+
+    def _format_customer(self, customer: Any) -> Dict[str, Any]:
+        data = self._to_plain_dict(customer)
         return {
-            "provider_usage_record_id": usage_record_id,
-            "subscription_item_id": subscription_item_id,
-            "quantity": quantity,
-            "timestamp": (timestamp or datetime.now(timezone.utc)).isoformat(),
+            "provider_customer_id": data.get("id"),
+            "email": data.get("email"),
+            "name": data.get("name"),
+            "created_at": self._timestamp_to_iso(data.get("created")),
+            "meta_info": dict(data.get("metadata") or {}),
         }
+
+    def _format_payment_method(self, payment_method: Any) -> Dict[str, Any]:
+        data = self._to_plain_dict(payment_method)
+        card_details = data.get("card")
+        if card_details:
+            card_details = {
+                "brand": card_details.get("brand"),
+                "last4": card_details.get("last4"),
+                "exp_month": card_details.get("exp_month"),
+                "exp_year": card_details.get("exp_year"),
+            }
+        return {
+            "payment_method_id": data.get("id"),
+            "type": data.get("type"),
+            "provider": "stripe",
+            "created_at": self._timestamp_to_iso(data.get("created")),
+            "card": card_details,
+        }
+
+    def _format_product(self, product: Any) -> Dict[str, Any]:
+        data = self._to_plain_dict(product)
+        return {
+            "provider_product_id": data.get("id"),
+            "name": data.get("name"),
+            "description": data.get("description"),
+            "active": data.get("active", True),
+            "created_at": self._timestamp_to_iso(data.get("created")),
+            "meta_info": dict(data.get("metadata") or {}),
+        }
+
+    def _format_price(self, price: Any) -> Dict[str, Any]:
+        data = self._to_plain_dict(price)
+        currency = data.get("currency", "usd")
+        return {
+            "provider_price_id": data.get("id"),
+            "product_id": data.get("product"),
+            "amount": self._from_stripe_amount(data.get("unit_amount"), currency),
+            "currency": currency.upper(),
+            "created_at": self._timestamp_to_iso(data.get("created")),
+            "recurring": data.get("recurring"),
+            "meta_info": dict(data.get("metadata") or {}),
+        }
+
+    def _format_subscription(self, subscription: Any) -> Dict[str, Any]:
+        data = self._to_plain_dict(subscription)
+        period_start = data.get("current_period_start")
+        period_end = data.get("current_period_end")
+        return {
+            "provider_subscription_id": data.get("id"),
+            "customer_id": data.get("customer"),
+            "price_id": self._extract_price_id(data),
+            "status": data.get("status"),
+            "quantity": self._extract_quantity(data),
+            "current_period_start": self._timestamp_to_iso(period_start),
+            "current_period_end": self._timestamp_to_iso(period_end),
+            "cancel_at_period_end": data.get("cancel_at_period_end", False),
+            "created_at": self._timestamp_to_iso(data.get("created")),
+            "meta_info": dict(data.get("metadata") or {}),
+        }
+
+    def _format_payment_intent(self, payment_intent: Any) -> Dict[str, Any]:
+        data = self._to_plain_dict(payment_intent)
+        currency = data.get("currency", "usd")
+        return {
+            "provider_payment_id": data.get("id"),
+            "amount": self._from_stripe_amount(data.get("amount"), currency),
+            "currency": currency.upper(),
+            "status": data.get("status"),
+            "description": data.get("description"),
+            "payment_method_id": data.get("payment_method"),
+            "created_at": self._timestamp_to_iso(data.get("created")),
+            "meta_info": dict(data.get("metadata") or {}),
+        }
+
+    def _format_refund(self, refund: Any, currency: Optional[str]) -> Dict[str, Any]:
+        data = self._to_plain_dict(refund)
+        refund_currency = currency or data.get("currency", "usd")
+        return {
+            "provider_refund_id": data.get("id"),
+            "payment_id": data.get("payment_intent"),
+            "amount": self._from_stripe_amount(data.get("amount"), refund_currency),
+            "status": data.get("status"),
+            "created_at": self._timestamp_to_iso(data.get("created")),
+        }
+
+    def _format_usage_record(self, usage_record: Any) -> Dict[str, Any]:
+        data = self._to_plain_dict(usage_record)
+        return {
+            "provider_usage_record_id": data.get("id"),
+            "subscription_item_id": data.get("subscription_item"),
+            "quantity": data.get("quantity"),
+            "timestamp": self._timestamp_to_iso(data.get("timestamp")),
+        }
+
+    def _extract_price_id(self, subscription_data: Dict[str, Any]) -> Optional[str]:
+        items = subscription_data.get("items")
+        if isinstance(items, dict):
+            data = items.get("data", [])
+            if data:
+                price = data[0].get("price")
+                if isinstance(price, dict):
+                    return price.get("id")
+                return price
+        plan = subscription_data.get("plan")
+        if isinstance(plan, dict):
+            return plan.get("id")
+        return plan
+
+    @staticmethod
+    def _extract_quantity(subscription_data: Dict[str, Any]) -> Optional[int]:
+        items = subscription_data.get("items")
+        if isinstance(items, dict):
+            data = items.get("data", [])
+            if data:
+                return data[0].get("quantity")
+        return subscription_data.get("quantity")
+
+    def _to_plain_dict(self, stripe_obj: Any) -> Dict[str, Any]:
+        if stripe_obj is None:
+            return {}
+        if isinstance(stripe_obj, dict):
+            return stripe_obj
+        if self.stripe and hasattr(self.stripe, "util"):
+            try:
+                return self.stripe.util.convert_to_dict(stripe_obj)
+            except Exception:  # noqa: BLE001
+                pass
+        if hasattr(stripe_obj, "to_dict"):
+            try:
+                return stripe_obj.to_dict()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            return dict(stripe_obj)
+        except Exception:  # noqa: BLE001
+            mapped: Dict[str, Any] = {}
+            for attr in dir(stripe_obj):
+                if attr.startswith("_"):
+                    continue
+                try:
+                    value = getattr(stripe_obj, attr)
+                except AttributeError:
+                    continue
+                if callable(value):
+                    continue
+                mapped[attr] = value
+            return mapped
