@@ -10,9 +10,11 @@ from ..models import Base
 from .base import BaseRepository
 from .customer_repository import CustomerRepository
 from .payment_repository import PaymentRepository
+from .payment_method_repository import PaymentMethodRepository
 from .subscription_repository import SubscriptionRepository
 from .product_repository import ProductRepository
 from .plan_repository import PlanRepository
+from .sync_job_repository import SyncJobRepository
 
 # Global engine
 _engine: Optional[AsyncEngine] = None
@@ -89,11 +91,10 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         await _create_schema_async(_engine)
         get_db._schema_created = True
 
+    # Use the sessionmaker async context to manage the session lifecycle. The
+    # context manager will close the session for us when the dependency exits.
     async with _sessionmaker() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+        yield session
 
 
 # Export repository classes
@@ -106,4 +107,6 @@ __all__ = [
     "SubscriptionRepository",
     "ProductRepository",
     "PlanRepository",
+    "PaymentMethodRepository",
+    "SyncJobRepository",
 ]

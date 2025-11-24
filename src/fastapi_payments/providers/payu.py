@@ -208,6 +208,7 @@ class PayUProvider(PaymentProvider):
         email: str,
         name: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
+        address: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         customer_id = f"payu_{uuid.uuid4().hex[:12]}"
         return {
@@ -215,7 +216,7 @@ class PayUProvider(PaymentProvider):
             "email": email,
             "name": name,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "meta_info": meta_info or {},
+            "meta_info": {**(meta_info or {}), **({"address": address} if address else {})},
         }
 
     async def retrieve_customer(self, provider_customer_id: str) -> Dict[str, Any]:

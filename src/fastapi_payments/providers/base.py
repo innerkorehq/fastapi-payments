@@ -35,6 +35,7 @@ class PaymentProvider(ABC):
         email: str,
         name: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
+        address: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Create a customer in the provider's system.
@@ -43,6 +44,7 @@ class PaymentProvider(ABC):
             email: Customer email
             name: Customer name
             meta_info: Additional customer meta_info
+            address: optional structured address to store on provider (line1, line2, city, state, postal_code, country)
 
         Returns:
             Customer data dictionary
@@ -106,6 +108,21 @@ class PaymentProvider(ABC):
             Payment method data
         """
         pass
+
+    async def create_setup_intent(
+        self, provider_customer_id: str, usage: Optional[str] = None, **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Create a SetupIntent or equivalent object used to initiate client-side
+        confirmation flows for saving payment methods (e.g. Stripe SetupIntent).
+
+        Return a dict with at least 'id' and 'client_secret' keys when supported.
+        """
+        # Default: providers that don't support SetupIntent-like flows can
+        # override this method. Returning NotImplementedError makes it clear
+        # at runtime if a provider is asked to create a setup intent it does
+        # not support it.
+        raise NotImplementedError("This provider does not support create_setup_intent")
 
     @abstractmethod
     async def list_payment_methods(
@@ -261,6 +278,7 @@ class PaymentProvider(ABC):
         payment_method_id: Optional[str] = None,
         description: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
+        mandate_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a one-time payment.

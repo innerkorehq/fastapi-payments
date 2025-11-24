@@ -91,12 +91,27 @@ class StripeProvider(PaymentProvider):
         email: str,
         name: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
+        address: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a customer in Stripe."""
         metadata = self._prepare_metadata(meta_info)
         params: Dict[str, Any] = {"email": email, "name": name}
         if metadata:
             params["metadata"] = metadata
+        # include address if provided (Stripe expects an address dict)
+        if address:
+            # Accept either dotted-field or direct dict and forward to Stripe
+            params["address"] = {
+                k: v for k, v in {
+                    "line1": address.get("line1") if isinstance(address, dict) else None,
+                    "line2": address.get("line2") if isinstance(address, dict) else None,
+                    "city": address.get("city") if isinstance(address, dict) else None,
+                    "state": address.get("state") if isinstance(address, dict) else None,
+                    "postal_code": address.get("postal_code") if isinstance(address, dict) else None,
+                    "country": address.get("country") if isinstance(address, dict) else None,
+                }.items()
+                if v
+            }
         customer = await self._call_stripe(self.stripe.Customer.create, **params)
         return self._format_customer(customer)
 
@@ -116,6 +131,19 @@ class StripeProvider(PaymentProvider):
             payload["email"] = data["email"]
         if "name" in data:
             payload["name"] = data["name"]
+        if "address" in data and data.get("address"):
+            addr = data.get("address")
+            payload["address"] = {
+                k: v for k, v in {
+                    "line1": addr.get("line1") if isinstance(addr, dict) else None,
+                    "line2": addr.get("line2") if isinstance(addr, dict) else None,
+                    "city": addr.get("city") if isinstance(addr, dict) else None,
+                    "state": addr.get("state") if isinstance(addr, dict) else None,
+                    "postal_code": addr.get("postal_code") if isinstance(addr, dict) else None,
+                    "country": addr.get("country") if isinstance(addr, dict) else None,
+                }.items()
+                if v
+            }
         if data.get("meta_info"):
             payload["metadata"] = self._prepare_metadata(data["meta_info"])
 
@@ -146,21 +174,62 @@ class StripeProvider(PaymentProvider):
         payment_method_id = params.pop("payment_method_id", None)
         
         if payment_method_id:
-            # Attach existing payment method
-            payment_method = await self._call_stripe(
-                self.stripe.PaymentMethod.attach,
-                payment_method_id,
-                customer=provider_customer_id,
-            )
+            # If a payment method id is supplied, prefer retrieving it first
+            # and only attach if it's not already attached to the correct
+            # customer. This handles cases where a SetupIntent has already
+            # attached the payment method (eg. India 3DS flows).
+            try:
+                pm = await self._call_stripe(
+                    self.stripe.PaymentMethod.retrieve, payment_method_id
+                )
+                pm_data = self._to_plain_dict(pm)
+                current_customer = pm_data.get("customer")
+                if not current_customer:
+                    payment_method = await self._call_stripe(
+                        self.stripe.PaymentMethod.attach,
+                        payment_method_id,
+                        customer=provider_customer_id,
+                    )
+                elif current_customer != provider_customer_id:
+                    # Attempt to attach to the provided customer; Stripe may
+                    # raise if cross-customer attachments are not allowed.
+                    payment_method = await self._call_stripe(
+                        self.stripe.PaymentMethod.attach,
+                        payment_method_id,
+                        customer=provider_customer_id,
+                    )
+                else:
+                    payment_method = pm
+            except Exception:
+                # Fall back to attempting an attach which will raise a helpful
+                # Stripe error if it can't be attached.
+                payment_method = await self._call_stripe(
+                    self.stripe.PaymentMethod.attach,
+                    payment_method_id,
+                    customer=provider_customer_id,
+                )
         else:
-            # Create new payment method
+            # Create new payment method. Only forward known, allowed keys to
+            # Stripe when creating a PaymentMethod to avoid passing unknown
+            # parameters (e.g. payment_method_id) which cause Stripe API errors.
+            token = params.pop("token", None)
+
+            allowed_create_keys = {"type", "card", "billing_details", "metadata"}
+            create_params = {k: v for k, v in params.items() if k in allowed_create_keys}
+
+            # If a token was supplied, prefer creating using the token wrapped
+            # inside the card payload (this keeps compatibility with token-based
+            # clients). If token is present and card isn't already passed, add it.
+            if token and "card" not in create_params:
+                create_params["card"] = {"token": token}
+
             payment_method = await self._call_stripe(
-                self.stripe.PaymentMethod.create, **params
+                self.stripe.PaymentMethod.create, **create_params
             )
 
+            # Attach the newly created payment method to the customer.
             await self._call_stripe(
-                self.stripe.PaymentMethod.attach,
-                payment_method["id"],
+                self.stripe.PaymentMethod.attach, payment_method["id"],
                 customer=provider_customer_id,
             )
 
@@ -171,7 +240,47 @@ class StripeProvider(PaymentProvider):
                 invoice_settings={"default_payment_method": payment_method["id"]},
             )
 
-        return self._format_payment_method(payment_method)
+        # If a setup_intent_id was provided, try to retrieve the SetupIntent
+        # and see if a mandate was created as part of the setup flow.
+        mandate_id = None
+        setup_intent_id = payment_details.get("setup_intent_id") if isinstance(payment_details, dict) else None
+        if setup_intent_id:
+            try:
+                si = await self._call_stripe(self.stripe.SetupIntent.retrieve, setup_intent_id)
+                si_data = self._to_plain_dict(si)
+                # SetupIntent may include a top-level 'mandate' or nested fields depending on API version
+                m = si_data.get("mandate") or si_data.get("latest_attempt", {}).get("mandate")
+                if isinstance(m, dict):
+                    mandate_id = m.get("id")
+                elif isinstance(m, str):
+                    mandate_id = m
+            except Exception:
+                # Ignore — retrieving SetupIntent is best-effort
+                mandate_id = None
+
+        formatted = self._format_payment_method(payment_method)
+        if mandate_id:
+            formatted["mandate_id"] = mandate_id
+
+        return formatted
+
+    async def create_setup_intent(
+        self, provider_customer_id: str, usage: Optional[str] = None, **kwargs
+    ) -> Dict[str, Any]:
+        """Create a Stripe SetupIntent to be confirmed client-side by the
+        browser. Returns the SetupIntent id and client_secret so the client
+        can call stripe.confirmCardSetup(...) to complete 3DS flows required
+        in certain regions (e.g. India).
+        """
+        params = {
+            "customer": provider_customer_id,
+            "payment_method_types": [self.default_payment_method_type],
+        }
+        if usage:
+            params["usage"] = usage
+        setup_intent = await self._call_stripe(self.stripe.SetupIntent.create, **params)
+        si = self._to_plain_dict(setup_intent)
+        return {"id": si.get("id"), "client_secret": si.get("client_secret")}
 
     async def list_payment_methods(
         self, provider_customer_id: str
@@ -271,6 +380,21 @@ class StripeProvider(PaymentProvider):
         )
         return self._format_subscription(subscription)
 
+    async def retrieve_product(self, provider_product_id: str) -> Dict[str, Any]:
+        """Retrieve product from Stripe and return a normalized dict."""
+        product = await self._call_stripe(self.stripe.Product.retrieve, provider_product_id)
+        return self._format_product(product)
+
+    async def retrieve_price(self, provider_price_id: str) -> Dict[str, Any]:
+        """Retrieve price/price_id from Stripe and return normalized dict."""
+        price = await self._call_stripe(self.stripe.Price.retrieve, provider_price_id)
+        return self._format_price(price)
+
+    async def retrieve_payment(self, provider_payment_id: str) -> Dict[str, Any]:
+        """Retrieve a payment intent from Stripe and return normalized dict."""
+        pi = await self._call_stripe(self.stripe.PaymentIntent.retrieve, provider_payment_id)
+        return self._format_payment_intent(pi)
+
     async def update_subscription(
         self, provider_subscription_id: str, data: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -326,6 +450,7 @@ class StripeProvider(PaymentProvider):
         payment_method_id: Optional[str] = None,
         description: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
+        mandate_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Process a one-time payment with Stripe using PaymentIntents."""
         params: Dict[str, Any] = {
@@ -342,6 +467,11 @@ class StripeProvider(PaymentProvider):
             params["payment_method"] = payment_method_id
             params["confirm"] = True
             params.setdefault("off_session", True)
+            # If a mandate id is provided (created during a SetupIntent
+            # confirm) pass it to the PaymentIntent so Stripe can complete
+            # the off-session payment under the mandate.
+            if mandate_id:
+                params["mandate"] = mandate_id
         else:
             params["automatic_payment_methods"] = {"enabled": True}
             params["confirm"] = False

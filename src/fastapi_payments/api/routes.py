@@ -12,13 +12,16 @@ from fastapi import (
     Path,
 )
 from typing import Dict, Any, Optional, List
+from fastapi import BackgroundTasks
 from pydantic import BaseModel, Field, EmailStr
 
 from ..schemas.payment import (
     CustomerCreate,
     CustomerResponse,
+    CustomerUpdate,
     PaymentMethodCreate,
     PaymentMethodResponse,
+        PaymentMethodUpdate,
     ProductCreate,
     ProductResponse,
     PlanCreate,
@@ -27,6 +30,9 @@ from ..schemas.payment import (
     SubscriptionResponse,
     PaymentCreate,
     PaymentResponse,
+    SyncJobResponse,
+    SyncRequest,
+    SyncResult,
 )
 from ..services.payment_service import PaymentService
 from .dependencies import get_payment_service_with_db
@@ -59,11 +65,34 @@ async def create_customer(
     """Create a new customer."""
     try:
         result = await payment_service.create_customer(
-            email=customer.email, name=customer.name, meta_info=customer.meta_info
+            email=customer.email,
+            name=customer.name,
+            meta_info=customer.meta_info,
+            address=getattr(customer, "address", None),
         )
         return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+    @router.patch("/customers/{customer_id}", response_model=CustomerResponse)
+    async def update_customer(
+        customer_id: str,
+        customer_update: "CustomerUpdate",
+        payment_service: PaymentService = Depends(get_payment_service_with_db),
+    ) -> Dict[str, Any]:
+        """Update an existing customer."""
+        try:
+            result = await payment_service.update_customer(
+                customer_id,
+                email=getattr(customer_update, "email", None),
+                name=getattr(customer_update, "name", None),
+                meta_info=getattr(customer_update, "meta_info", None),
+                address=getattr(customer_update, "address", None),
+            )
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/customers/{customer_id}", response_model=CustomerResponse)
@@ -94,6 +123,76 @@ async def create_payment_method(
             payment_details=payment_method.model_dump(),
         )
         return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.patch(
+    "/customers/{customer_id}/payment-methods/{method_id}",
+    response_model=PaymentMethodResponse,
+)
+async def update_payment_method(
+    customer_id: str,
+    method_id: str,
+    payload: PaymentMethodUpdate,
+    payment_service: PaymentService = Depends(get_payment_service_with_db),
+) -> Dict[str, Any]:
+    """Update stored payment method (e.g., set default, update meta)."""
+    try:
+        result = await payment_service.update_payment_method(
+            customer_id=customer_id, method_id=method_id, **payload.model_dump(exclude_none=True)
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post(
+    "/customers/{customer_id}/payment-methods/{method_id}/default",
+    response_model=PaymentMethodResponse,
+)
+async def set_default_payment_method(
+    customer_id: str,
+    method_id: str,
+    payment_service: PaymentService = Depends(get_payment_service_with_db),
+) -> Dict[str, Any]:
+    """Mark the stored payment method as default for this customer."""
+    try:
+        result = await payment_service.set_default_payment_method(
+            customer_id=customer_id, method_id=method_id
+        )
+        # normalize to PaymentMethodResponse fields
+        return {
+            "id": result["id"],
+            "provider": result.get("provider"),
+            "type": "card",
+            "is_default": result.get("is_default", False),
+            "card": None,
+            "mandate_id": None,
+            "created_at": None,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.delete(
+    "/customers/{customer_id}/payment-methods/{method_id}",
+    response_model=Dict[str, Any],
+)
+async def delete_payment_method(
+    customer_id: str,
+    method_id: str,
+    payment_service: PaymentService = Depends(get_payment_service_with_db),
+) -> Dict[str, Any]:
+    """Delete/detach a saved payment method for the customer."""
+    try:
+        result = await payment_service.delete_payment_method(
+            customer_id=customer_id, method_id=method_id
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -303,6 +402,47 @@ async def list_payments(
         offset=offset,
     )
 
+@router.post("/sync", response_model=SyncJobResponse)
+async def sync_resources(
+    request: SyncRequest,
+    background_tasks: BackgroundTasks,
+    payment_service: PaymentService = Depends(get_payment_service_with_db),
+) -> Dict[str, Any]:
+    """Synchronize local database entities with provider state.
+
+    You can request a subset of resources to sync by providing `resources`.
+    Supported names: customers, products, plans, payments, subscriptions, payment_methods.
+    """
+    try:
+        # Create a job record and schedule background execution; return job id
+        job = await payment_service.create_sync_job(
+            resources=request.resources, provider=request.provider, filters=request.filters
+        )
+
+        # schedule background execution of the job
+        background_tasks.add_task(payment_service.execute_sync_job, job["id"])
+
+        return job
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sync/{job_id}", response_model=SyncJobResponse)
+async def get_sync_job(
+    job_id: str,
+    payment_service: PaymentService = Depends(get_payment_service_with_db),
+) -> Dict[str, Any]:
+    job = await payment_service.sync_job_repo.get_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Sync job not found")
+    return {
+        "id": job.id,
+        "status": job.status,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "result": job.result,
+    }
+
 
 @router.post("/payments", response_model=PaymentResponse)
 async def process_payment(
@@ -315,6 +455,7 @@ async def process_payment(
             customer_id=payment.customer_id,
             amount=payment.amount,
             currency=payment.currency,
+            mandate_id=getattr(payment, 'mandate_id', None),
             payment_method_id=payment.payment_method_id,
             description=payment.description,
             meta_info=payment.meta_info,

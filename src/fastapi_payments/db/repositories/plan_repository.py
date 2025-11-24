@@ -82,3 +82,15 @@ class PlanRepository:
 
     async def list_for_product(self, product_id: str, *, limit: int = 50, offset: int = 0) -> list[Plan]:
         return await self.list(product_id=product_id, limit=limit, offset=offset)
+
+    async def update(self, plan_id: str, **fields: Any) -> Optional[Plan]:
+        plan = await self.get_by_id(plan_id)
+        if not plan:
+            return None
+        for attr, value in fields.items():
+            if hasattr(plan, attr):
+                setattr(plan, attr, value)
+        self.session.add(plan)
+        await self.session.commit()
+        await self.session.refresh(plan)
+        return plan

@@ -150,6 +150,7 @@ class PayPalProvider(PaymentProvider):
         email: str,
         name: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
+        address: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Create a customer in PayPal.
@@ -177,7 +178,7 @@ class PayPalProvider(PaymentProvider):
             "email": email,
             "name": name,
             "created_at": datetime.now(timezone.utc),
-            "meta_info": meta_info or {},
+            "meta_info": {**(meta_info or {}), **({"address": address} if address else {})},
         }
 
     async def retrieve_customer(self, provider_customer_id: str) -> Dict[str, Any]:

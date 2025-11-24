@@ -8,6 +8,14 @@ class CustomerCreate(BaseModel):
 
     email: EmailStr
     name: Optional[str] = None
+    address: Optional[Dict[str, Any]] = None
+    meta_info: Optional[Dict[str, Any]] = None
+
+
+class CustomerUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    name: Optional[str] = None
+    address: Optional[Dict[str, Any]] = None
     meta_info: Optional[Dict[str, Any]] = None
 
 
@@ -26,6 +34,7 @@ class CustomerResponse(BaseModel):
     email: str
     name: Optional[str] = None
     meta_info: Optional[Dict[str, Any]] = None
+    address: Optional[Dict[str, Any]] = None
     created_at: str
     updated_at: Optional[str] = None
     provider_customer_id: Optional[str] = None
@@ -41,6 +50,13 @@ class PaymentMethodCreate(BaseModel):
     set_default: bool = False
 
 
+class PaymentMethodUpdate(BaseModel):
+    """Schema for updating a stored payment method."""
+
+    is_default: Optional[bool] = None
+    meta_info: Optional[Dict[str, Any]] = None
+
+
 class PaymentMethodResponse(BaseModel):
     """Schema for payment method response."""
 
@@ -49,6 +65,7 @@ class PaymentMethodResponse(BaseModel):
     type: str
     is_default: bool = False
     card: Optional[Dict[str, Any]] = None
+    mandate_id: Optional[str] = None
     created_at: Optional[str] = None
 
 
@@ -157,6 +174,7 @@ class PaymentCreate(BaseModel):
     amount: float = Field(gt=0)
     currency: str = "USD"
     payment_method_id: Optional[str] = None
+    mandate_id: Optional[str] = None
     description: Optional[str] = None
     meta_info: Optional[Dict[str, Any]] = None
 
@@ -176,3 +194,36 @@ class PaymentResponse(BaseModel):
     provider_payment_id: str
     created_at: str
     meta_info: Optional[Dict[str, Any]] = None
+
+
+class SyncRequest(BaseModel):
+    """Schema used to request a selective sync of resources.
+
+    `resources` is an optional list of resource names to sync. If omitted,
+    all supported resources will be synced. The `provider` can be used to
+    limit the sync to a single provider. `filters` may contain resource
+    specific filters (e.g. customer_id, product_id).
+    """
+
+    resources: Optional[List[str]] = None
+    provider: Optional[str] = None
+    filters: Optional[Dict[str, Any]] = None
+
+
+class SyncResultItem(BaseModel):
+    synced: int = 0
+    updated: int = 0
+    created: int = 0
+    errors: Optional[List[str]] = None
+
+
+class SyncResult(BaseModel):
+    summary: Dict[str, SyncResultItem] = Field(default_factory=dict)
+
+
+class SyncJobResponse(BaseModel):
+    id: str
+    status: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None

@@ -51,6 +51,42 @@ def initialize_test_dependencies():
     config = PaymentConfig(**TEST_CONFIG)
     initialize_dependencies(config)
 
+    # Replace the real stripe SDK with our local FakeStripe for tests so
+    # integration tests remain hermetic and don't hit the network.
+    try:
+        # import the shared FakeStripe used in provider unit tests
+        from tests.fakes.fake_stripe import FakeStripe
+
+        # also import optional fakes for other providers
+        try:
+            from tests.fakes.fake_payu import FakePayU
+        except Exception:
+            FakePayU = None
+
+        # dependencies._payment_service is created by initialize_dependencies
+        from fastapi_payments.api import dependencies as deps
+
+        if getattr(deps, "_payment_service", None):
+            # Replace internals for Stripe provider so unit and integration tests
+            # don't make network calls.
+            provider = deps._payment_service.providers.get("stripe")
+            if provider:
+                provider._run_stripe_calls_in_thread = False
+                provider.stripe = FakeStripe()
+                provider.stripe_error = provider.stripe.error
+
+            # If the app initialized a PayU provider, replace it with our fake
+            # PayU implementation so hosted-checkout integration tests are hermetic.
+            if FakePayU:
+                payu_provider = deps._payment_service.providers.get("payu")
+                if payu_provider:
+                    deps._payment_service.providers["payu"] = FakePayU()
+    except Exception:
+        # If any of the imports fail (test module missing etc.) just continue
+        # — tests that rely on real stripe will fail but we don't want to
+        # abort test session initialization.
+        pass
+
     # Initialize database
     if _TEST_DB_PATH.exists():
         _TEST_DB_PATH.unlink()
@@ -58,6 +94,7 @@ def initialize_test_dependencies():
     initialize_db(db_config)
 
     return config
+    
 
 
 @pytest.fixture

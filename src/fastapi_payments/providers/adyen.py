@@ -48,6 +48,7 @@ class AdyenProvider(PaymentProvider):
         email: str,
         name: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
+        address: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a customer in Adyen."""
         if self.sandbox_mode:
@@ -58,7 +59,7 @@ class AdyenProvider(PaymentProvider):
                 "email": email,
                 "name": name,
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "meta_info": meta_info or {},
+                "meta_info": {**(meta_info or {}), **({"address": address} if address else {})},
             }
 
         try:
@@ -90,7 +91,7 @@ class AdyenProvider(PaymentProvider):
                 "email": email,
                 "name": name,
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "meta_info": meta_info or {},
+                "meta_info": {**(meta_info or {}), **({"address": address} if address else {})},
             }
         except Exception as e:
             logger.error(f"Error creating Adyen customer: {str(e)}")

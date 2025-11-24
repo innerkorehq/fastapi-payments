@@ -10,6 +10,7 @@ from ..db.repositories import (
     BaseRepository,
     CustomerRepository,
     PaymentRepository,
+        PaymentMethodRepository,
     SubscriptionRepository,
     ProductRepository,
     PlanRepository,
@@ -50,6 +51,7 @@ class PaymentService:
         if db_session:
             self.customer_repo = CustomerRepository(db_session)
             self.payment_repo = PaymentRepository(db_session)
+            self.payment_method_repo = PaymentMethodRepository(db_session)
             self.subscription_repo = SubscriptionRepository(db_session)
             self.product_repo = ProductRepository(db_session)
             self.plan_repo = PlanRepository(db_session)
@@ -67,6 +69,11 @@ class PaymentService:
         self.subscription_repo = SubscriptionRepository(session)
         self.product_repo = ProductRepository(session)
         self.plan_repo = PlanRepository(session)
+        self.payment_method_repo = PaymentMethodRepository(session)
+        # Sync job repository
+        from ..db.repositories.sync_job_repository import SyncJobRepository
+
+        self.sync_job_repo = SyncJobRepository(session)
 
     def get_provider(self, provider_name: Optional[str] = None) -> Any:
         """
@@ -90,6 +97,7 @@ class PaymentService:
         name: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
         provider: Optional[str] = None,
+        address: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Create a customer.
@@ -105,13 +113,15 @@ class PaymentService:
         """
         provider_instance = self.get_provider(provider)
         customer_data = await provider_instance.create_customer(
-            email=email, name=name, meta_info=meta_info
+            email=email, name=name, meta_info=meta_info, address=address
         )
 
         # Save to database if session available
         if hasattr(self, "customer_repo"):
+            # Persist address into the dedicated column. The repository will
+            # detect and migrate any address embedded in meta_info if needed.
             customer = await self.customer_repo.create(
-                email=email, name=name, meta_info=meta_info
+                email=email, name=name, meta_info=meta_info, address=address
             )
 
             # Link the provider's customer ID to our customer
@@ -121,13 +131,15 @@ class PaymentService:
                 provider_customer_id=customer_data["provider_customer_id"],
             )
 
-            # Return standardized customer data
+            # Return standardized customer data (include top-level address)
             return {
                 "id": customer.id,
                 "email": customer.email,
                 "name": customer.name,
                 "created_at": customer.created_at.isoformat(),
                 "provider_customer_id": customer_data["provider_customer_id"],
+                "meta_info": customer.meta_info,
+                "address": customer.address,
             }
         else:
             # No database session, return the provider's response directly
@@ -175,6 +187,7 @@ class PaymentService:
             "email": customer.email,
             "name": customer.name,
             "meta_info": customer.meta_info,
+            "address": customer.address,
             "created_at": customer.created_at.isoformat(),
             "updated_at": customer.updated_at.isoformat(),
             "provider_customers": [
@@ -223,6 +236,7 @@ class PaymentService:
                     "email": customer.email,
                     "name": customer.name,
                     "meta_info": customer.meta_info,
+                    "address": customer.address,
                     "created_at": customer.created_at.isoformat(),
                     "updated_at": customer.updated_at.isoformat()
                     if customer.updated_at
@@ -266,19 +280,27 @@ class PaymentService:
 
         # Update customer in database
         update_fields = {}
+        # If address provided, store into dedicated address column
+        if "address" in kwargs and kwargs["address"] is not None:
+            update_fields["address"] = kwargs["address"]
+
         for field in ["email", "name", "meta_info"]:
-            if field in kwargs:
+            if field in kwargs and field not in update_fields:
                 update_fields[field] = kwargs[field]
 
         if update_fields:
+            logger.debug(f"Updating customer {customer_id} with fields: {update_fields}")
             customer = await customer_repo.update(customer_id, **update_fields)
 
         # Update customer in providers
         for provider_customer in customer.provider_customers:
             provider_instance = self.get_provider(provider_customer.provider)
             try:
+                # When updating providers, pass through any top-level fields.
+                # If address is present, include it in the data payload as 'address'.
+                provider_payload = dict(kwargs)
                 await provider_instance.update_customer(
-                    provider_customer.provider_customer_id, **kwargs
+                    provider_customer.provider_customer_id, provider_payload
                 )
             except Exception as e:
                 logger.error(f"Error updating provider customer: {str(e)}")
@@ -329,6 +351,30 @@ class PaymentService:
             provider_customer.provider_customer_id, payment_details
         )
 
+        # Persist payment method server-side if we have a session/repo
+        if hasattr(self, "payment_method_repo"):
+            # Normalize card metadata if present
+            card = payment_method.get("card") or {}
+            pm = await self.payment_method_repo.create(
+                customer_id=customer_id,
+                provider=provider_name,
+                provider_payment_method_id=payment_method["payment_method_id"],
+                mandate_id=payment_method.get("mandate_id"),
+                is_default=payment_method.get("is_default", False),
+                card_brand=card.get("brand"),
+                card_last4=card.get("last4"),
+                card_exp_month=card.get("exp_month"),
+                card_exp_year=card.get("exp_year"),
+                meta_info=payment_method.get("meta_info", {}),
+            )
+
+            # Replace returned payload with DB-backed values
+            payment_method["stored_id"] = pm.id
+            payment_method["is_default"] = pm.is_default
+            # Ensure mandate_id (if provider returned one) is present
+            if pm.mandate_id:
+                payment_method["mandate_id"] = pm.mandate_id
+
         # Publish event
         await self.event_publisher.publish_event(
             PaymentEvents.PAYMENT_METHOD_CREATED,
@@ -339,15 +385,50 @@ class PaymentService:
             },
         )
 
-        # Return payment method data
-        return {
-            "id": payment_method["payment_method_id"],
+        # Return payment method data (persisted if we have DB storage)
+        result = {
+            "id": payment_method.get("payment_method_id") or payment_method.get("stored_id"),
             "provider": provider_name,
             "type": payment_method.get("type"),
             "is_default": payment_method.get("is_default", False),
             "card": payment_method.get("card"),
             "created_at": datetime.utcnow().isoformat(),
         }
+        # Include mandate_id if the provider returned it (e.g., from a SetupIntent)
+        if payment_method.get("mandate_id"):
+            result["mandate_id"] = payment_method.get("mandate_id")
+
+        return result
+
+    async def create_setup_intent(
+        self, customer_id: str, provider: Optional[str] = None, usage: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a SetupIntent (or provider equivalent) for the given customer so
+        a client-side flow (3DS) can be completed before saving a payment method.
+
+        Returns a dict that includes `id` and `client_secret` keys when supported
+        by the provider.
+        """
+        if not self.db_session:
+            raise RuntimeError("Database session not set")
+
+        provider_name = provider or self.default_provider
+        customer_repo = CustomerRepository(self.db_session)
+
+        provider_customer = await customer_repo.get_provider_customer(
+            customer_id, provider_name
+        )
+        if not provider_customer:
+            raise ValueError(
+                f"Customer not found for provider {provider_name}"
+            )
+
+        provider_instance = self.get_provider(provider_name)
+        result = await provider_instance.create_setup_intent(
+            provider_customer.provider_customer_id, usage=usage
+        )
+        return result
 
     async def list_payment_methods(
         self, customer_id: str, provider: Optional[str] = None
@@ -376,7 +457,31 @@ class PaymentService:
             raise ValueError(
                 f"Customer not found for provider {provider_name}")
 
-        # List payment methods from provider
+        # Prefer returning server-side stored payment methods when available
+        if hasattr(self, "payment_method_repo"):
+            stored_methods = await self.payment_method_repo.list_for_customer(
+                customer_id, provider=provider_name
+            )
+            return [
+                {
+                    "id": m.provider_payment_method_id,
+                    "provider": m.provider,
+                    "type": "card" if m.card_brand else "unknown",
+                    "is_default": bool(m.is_default),
+                    "card": {
+                        "brand": m.card_brand,
+                        "last4": m.card_last4,
+                        "exp_month": m.card_exp_month,
+                        "exp_year": m.card_exp_year,
+                    }
+                    if m.card_brand
+                    else None,
+                    "mandate_id": getattr(m, "mandate_id", None),
+                }
+                for m in stored_methods
+            ]
+
+        # Fallback: query provider directly when server storage isn't available
         provider_instance = self.get_provider(provider_name)
         payment_methods = await provider_instance.list_payment_methods(
             provider_customer.provider_customer_id
@@ -390,9 +495,151 @@ class PaymentService:
                 "type": pm.get("type"),
                 "is_default": pm.get("is_default", False),
                 "card": pm.get("card"),
+                "mandate_id": pm.get("mandate_id"),
             }
             for pm in payment_methods
         ]
+
+    async def update_payment_method(
+        self,
+        customer_id: str,
+        method_id: str,
+        provider: Optional[str] = None,
+        **fields: Any,
+    ) -> Dict[str, Any]:
+        """Update a stored payment method's attributes.
+
+        Supported updates include setting is_default, or meta_info.
+        """
+        if not self.db_session:
+            raise RuntimeError("Database session not set")
+
+        pm_repo = self.payment_method_repo
+        pm = await pm_repo.get_by_id(method_id)
+        # If caller passed a provider_payment_method_id (not the DB id), try lookup
+        if not pm:
+            pm = await pm_repo.get_by_provider_method_id(provider, method_id)
+        if not pm or pm.customer_id != customer_id:
+            raise ValueError("Payment method not found for customer")
+
+        # Handle set_default specially: update provider and DB
+        if fields.get("is_default"):
+            # Use repository helper to mark default
+            await pm_repo.set_default(customer_id, method_id)
+
+            # If provider supports setting default at customer-level, attempt it
+            try:
+                provider_instance = self.get_provider(provider or pm.provider)
+                # update the provider customer's invoice_settings.default_payment_method
+                # Find provider_customer link
+                customer_repo = CustomerRepository(self.db_session)
+                provider_customer = await customer_repo.get_provider_customer(
+                    customer_id, provider or pm.provider
+                )
+                if provider_customer:
+                    await provider_instance.update_customer(
+                        provider_customer.provider_customer_id,
+                        {"invoice_settings": {"default_payment_method": pm.provider_payment_method_id}},
+                    )
+            except Exception:
+                # Provider may not support or we don't want failures to block; log and continue
+                logger.exception("Failed to set provider-side default payment method")
+
+        # Update any DB-stored meta or card fields
+        update_fields = {k: v for k, v in fields.items() if k != "is_default"}
+        if update_fields:
+            updated = await pm_repo.update(method_id, **update_fields)
+            pm = updated
+
+        return {
+            "id": pm.provider_payment_method_id,
+            "provider": pm.provider,
+            "is_default": bool(pm.is_default),
+            "card": {
+                "brand": pm.card_brand,
+                "last4": pm.card_last4,
+                "exp_month": pm.card_exp_month,
+                "exp_year": pm.card_exp_year,
+            }
+            if pm.card_brand
+            else None,
+            "mandate_id": getattr(pm, "mandate_id", None),
+        }
+
+    async def delete_payment_method(
+        self, customer_id: str, method_id: str, provider: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Delete (detach) a stored payment method both in provider (if supported) and DB."""
+        if not self.db_session:
+            raise RuntimeError("Database session not set")
+
+        pm_repo = self.payment_method_repo
+        pm = await pm_repo.get_by_id(method_id)
+        if not pm:
+            pm = await pm_repo.get_by_provider_method_id(provider, method_id)
+        if not pm or pm.customer_id != customer_id:
+            raise ValueError("Payment method not found for customer")
+
+        provider_name = provider or pm.provider
+        # Try to delete/detach in provider
+        try:
+            provider_instance = self.get_provider(provider_name)
+            if hasattr(provider_instance, "delete_payment_method"):
+                await provider_instance.delete_payment_method(pm.provider_payment_method_id)
+        except Exception:
+            logger.exception("Error deleting payment method at provider; continuing to remove DB record")
+
+        # Remove from DB
+        deleted = await pm_repo.delete(method_id)
+        # Publish event
+        await self.event_publisher.publish_event(
+            PaymentEvents.PAYMENT_METHOD_DELETED,
+            {"customer_id": customer_id, "provider": provider_name, "payment_method_id": method_id},
+        )
+
+        return {"deleted": bool(deleted), "id": method_id}
+
+    async def set_default_payment_method(
+        self, customer_id: str, method_id: str, provider: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Mark a stored payment method as the default for the customer.
+
+        Updates both DB (via repository.set_default) and attempts to update the provider's
+        customer default payment settings where supported.
+        """
+        if not self.db_session:
+            raise RuntimeError("Database session not set")
+
+        pm_repo = self.payment_method_repo
+        pm = await pm_repo.get_by_id(method_id)
+        if not pm:
+            pm = await pm_repo.get_by_provider_method_id(provider, method_id)
+        if not pm or pm.customer_id != customer_id:
+            raise ValueError("Payment method not found for customer")
+
+        # Set DB default
+        updated = await pm_repo.set_default(customer_id, method_id)
+
+        # Set default on provider (customer invoice settings) if possible
+        try:
+            provider_instance = self.get_provider(provider or pm.provider)
+            customer_repo = CustomerRepository(self.db_session)
+            provider_customer = await customer_repo.get_provider_customer(
+                customer_id, provider or pm.provider
+            )
+            if provider_customer:
+                await provider_instance.update_customer(
+                    provider_customer.provider_customer_id,
+                    {"invoice_settings": {"default_payment_method": pm.provider_payment_method_id}},
+                )
+        except Exception:
+            logger.exception("Failed to set provider-side default payment method")
+
+        return {
+            "id": updated.provider_payment_method_id,
+            "is_default": bool(updated.is_default),
+            "provider": updated.provider,
+        }
 
     async def create_product(
         self,
@@ -918,6 +1165,7 @@ class PaymentService:
         payment_method_id: Optional[str] = None,
         description: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
+        mandate_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a one-time payment.
@@ -974,6 +1222,7 @@ class PaymentService:
             provider_customer_id=provider_customer.provider_customer_id,
             payment_method_id=payment_method_id,
             description=description,
+            mandate_id=mandate_id,
             meta_info=provider_meta_payload,
         )
 
@@ -1034,6 +1283,355 @@ class PaymentService:
             "created_at": payment.created_at.isoformat(),
             "meta_info": payment.meta_info,
         }
+
+    async def sync_resources(
+        self,
+        resources: Optional[List[str]] = None,
+        provider: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """Synchronize local DB state with provider(s).
+
+        This is best-effort: for each requested resource we attempt to fetch
+        authoritative data from the configured provider(s) and update local
+        rows where possible. If a provider does not implement the expected
+        retrieval method for a resource, the resource is skipped for that
+        provider.
+
+        Args:
+            resources: list of resource names to sync (customers, products,
+                plans, payments, subscriptions, payment_methods). If None,
+                all supported resources are synced.
+            provider: optional provider name to limit sync to one provider.
+            filters: resource-specific filters e.g. {'customer_id': '...'}
+            limit/offset: pagination for resource listing.
+
+        Returns:
+            A dict summarizing how many items were examined/updated and any
+            errors encountered for each resource.
+        """
+        if not self.db_session:
+            raise RuntimeError("Database session not set")
+
+        supported = [
+            "customers",
+            "products",
+            "plans",
+            "payments",
+            "subscriptions",
+            "payment_methods",
+        ]
+
+        to_sync = set(resources or supported)
+        result: Dict[str, Any] = {r: {"synced": 0, "updated": 0, "created": 0, "errors": []} for r in to_sync if r in supported}
+        filters = filters or {}
+
+        # CUSTOMERS
+        if "customers" in to_sync:
+            try:
+                cust_repo = CustomerRepository(self.db_session)
+                if filters.get("customer_id"):
+                    customers = [await cust_repo.get_with_provider_customers(filters["customer_id"])]
+                else:
+                    customers = await cust_repo.list(limit=limit, offset=offset, include_provider_customers=True)
+
+                for customer in customers:
+                    if not customer:
+                        continue
+                    result["customers"]["synced"] += 1
+                    # For each provider link, try to retrieve provider data
+                    for pc in customer.provider_customers:
+                        if provider and pc.provider != provider:
+                            continue
+                        provider_instance = self.get_provider(pc.provider)
+                        retrieve = getattr(provider_instance, "retrieve_customer", None)
+                        if not callable(retrieve):
+                            continue
+                        try:
+                            pdata = await retrieve(pc.provider_customer_id)
+                            # Persist provider data into customer.meta_info.provider_data
+                            meta = dict(customer.meta_info or {})
+                            provider_map = dict(meta.get("provider_data") or {})
+                            provider_map[pc.provider] = pdata
+                            meta["provider_data"] = provider_map
+                            await cust_repo.update(customer.id, meta_info=meta)
+                            result["customers"]["updated"] += 1
+                        except Exception as e:
+                            result["customers"]["errors"].append(str(e))
+            except Exception as e:
+                result["customers"]["errors"].append(str(e))
+
+        # PRODUCTS
+        if "products" in to_sync:
+            try:
+                prod_repo = ProductRepository(self.db_session)
+                if filters.get("product_id"):
+                    prods = [await prod_repo.get_by_id(filters["product_id"])]
+                else:
+                    prods = await prod_repo.list(limit=limit, offset=offset)
+
+                for p in prods:
+                    if not p:
+                        continue
+                    result["products"]["synced"] += 1
+                    meta = p.meta_info or {}
+                    prov = provider or meta.get("provider")
+                    prov_pid = meta.get("provider_product_id")
+                    if not prov or not prov_pid:
+                        continue
+                    provider_instance = self.get_provider(prov)
+                    retrieve = getattr(provider_instance, "retrieve_product", None)
+                    if not callable(retrieve):
+                        # provider doesn't expose retrieve_product: skip
+                        continue
+                    try:
+                        pdata = await retrieve(prov_pid)
+                        provider_map = dict(meta.get("provider_data") or {})
+                        provider_map[prov] = pdata
+                        meta["provider_data"] = provider_map
+                        await prod_repo.update(p.id, meta_info=meta)
+                        result["products"]["updated"] += 1
+                    except Exception as e:
+                        result["products"]["errors"].append(str(e))
+            except Exception as e:
+                result["products"]["errors"].append(str(e))
+
+        # PLANS
+        if "plans" in to_sync:
+            try:
+                plan_repo = PlanRepository(self.db_session)
+                if filters.get("plan_id"):
+                    plans = [await plan_repo.get_by_id(filters["plan_id"])]
+                else:
+                    plans = await plan_repo.list(limit=limit, offset=offset)
+
+                for pl in plans:
+                    if not pl:
+                        continue
+                    result["plans"]["synced"] += 1
+                    meta = pl.meta_info or {}
+                    prov = provider or meta.get("provider")
+                    prov_price_id = meta.get("provider_price_id")
+                    if not prov or not prov_price_id:
+                        continue
+                    provider_instance = self.get_provider(prov)
+                    # Try a couple of possible method names
+                    retrieve = getattr(provider_instance, "retrieve_price", None) or getattr(provider_instance, "retrieve_plan", None)
+                    if not callable(retrieve):
+                        continue
+                    try:
+                        pdata = await retrieve(prov_price_id)
+                        provider_map = dict(meta.get("provider_data") or {})
+                        provider_map[prov] = pdata
+                        meta["provider_data"] = provider_map
+                        await plan_repo.update(pl.id, meta_info=meta)
+                        result["plans"]["updated"] += 1
+                    except Exception as e:
+                        result["plans"]["errors"].append(str(e))
+            except Exception as e:
+                result["plans"]["errors"].append(str(e))
+
+        # SUBSCRIPTIONS
+        if "subscriptions" in to_sync:
+            try:
+                sub_repo = SubscriptionRepository(self.db_session)
+                if filters.get("subscription_id"):
+                    subs = [await sub_repo.get_by_id(filters["subscription_id"])]
+                else:
+                    subs = await sub_repo.list(limit=limit, offset=offset, include_plan=True)
+
+                for s in subs:
+                    if not s:
+                        continue
+                    result["subscriptions"]["synced"] += 1
+                    if provider and s.provider != provider:
+                        continue
+                    provider_instance = self.get_provider(s.provider)
+                    retrieve = getattr(provider_instance, "retrieve_subscription", None)
+                    if not callable(retrieve):
+                        continue
+                    try:
+                        pdata = await retrieve(s.provider_subscription_id)
+                        # Update local subscription fields where appropriate
+                        update_fields: Dict[str, Any] = {}
+                        status = pdata.get("status")
+                        if status:
+                            update_fields["status"] = status
+                        cps = pdata.get("current_period_start") or pdata.get("current_period_start_iso")
+                        cpe = pdata.get("current_period_end") or pdata.get("current_period_end_iso")
+                        if cps:
+                            try:
+                                update_fields["current_period_start"] = (
+                                    datetime.fromisoformat(cps.replace("Z", "+00:00"))
+                                    if isinstance(cps, str)
+                                    else cps
+                                )
+                            except Exception:
+                                pass
+                        if cpe:
+                            try:
+                                update_fields["current_period_end"] = (
+                                    datetime.fromisoformat(cpe.replace("Z", "+00:00"))
+                                    if isinstance(cpe, str)
+                                    else cpe
+                                )
+                            except Exception:
+                                pass
+                        if "cancel_at_period_end" in pdata:
+                            update_fields["cancel_at_period_end"] = pdata.get("cancel_at_period_end")
+                        if update_fields:
+                            await sub_repo.update(s.id, **update_fields)
+                            result["subscriptions"]["updated"] += 1
+                    except Exception as e:
+                        result["subscriptions"]["errors"].append(str(e))
+            except Exception as e:
+                result["subscriptions"]["errors"].append(str(e))
+
+        # PAYMENTS
+        if "payments" in to_sync:
+            try:
+                pay_repo = PaymentRepository(self.db_session)
+                if filters.get("payment_id"):
+                    pays = [await pay_repo.get_by_id(filters["payment_id"])]
+                else:
+                    pays = await pay_repo.list(limit=limit, offset=offset)
+
+                for p in pays:
+                    if not p:
+                        continue
+                    result["payments"]["synced"] += 1
+                    if provider and p.provider != provider:
+                        continue
+                    provider_instance = self.get_provider(p.provider)
+                    retrieve = getattr(provider_instance, "retrieve_payment", None)
+                    if not callable(retrieve):
+                        continue
+                    try:
+                        pdata = await retrieve(p.provider_payment_id)
+                        update_fields = {}
+                        if pdata.get("status"):
+                            update_fields["status"] = pdata.get("status")
+                        if pdata.get("meta_info"):
+                            update_fields["meta_info"] = {**(p.meta_info or {}), "provider_data": {p.provider: pdata.get("meta_info")}}
+                        if update_fields:
+                            await pay_repo.update(p.id, **update_fields)
+                            result["payments"]["updated"] += 1
+                    except Exception as e:
+                        result["payments"]["errors"].append(str(e))
+            except Exception as e:
+                result["payments"]["errors"].append(str(e))
+
+        # PAYMENT METHODS (attempt reconcile provider-side saved methods)
+        if "payment_methods" in to_sync:
+            try:
+                cust_repo = CustomerRepository(self.db_session)
+                pm_repo = PaymentMethodRepository(self.db_session)
+                # If a customer_id filter is present we only fetch for that customer
+                if filters.get("customer_id"):
+                    customers = [await cust_repo.get_with_provider_customers(filters["customer_id"])]
+                else:
+                    customers = await cust_repo.list(limit=limit, offset=offset, include_provider_customers=True)
+
+                for customer in customers:
+                    if not customer:
+                        continue
+                    # For each provider-link, fetch provider's payment methods
+                    for pc in customer.provider_customers:
+                        if provider and pc.provider != provider:
+                            continue
+                        prov = pc.provider
+                        provider_instance = self.get_provider(prov)
+                        list_pm = getattr(provider_instance, "list_payment_methods", None)
+                        if not callable(list_pm):
+                            continue
+                        try:
+                            pms = await list_pm(pc.provider_customer_id)
+                            result["payment_methods"]["synced"] += len(pms)
+                            for pm in pms:
+                                # pm should include payment_method_id and card data
+                                pid = pm.get("payment_method_id")
+                                if not pid:
+                                    continue
+                                existing = await pm_repo.get_by_provider_method_id(prov, pid)
+                                if existing:
+                                    # update metadata
+                                    await pm_repo.update(existing.id, meta_info={**(existing.meta_info or {}), "provider_data": pm})
+                                    result["payment_methods"]["updated"] += 1
+                                else:
+                                    # create new DB-backed method
+                                    card = pm.get("card") or {}
+                                    await pm_repo.create(
+                                        customer_id=customer.id,
+                                        provider=prov,
+                                        provider_payment_method_id=pid,
+                                        mandate_id=pm.get("mandate_id"),
+                                        is_default=pm.get("is_default", False),
+                                        card_brand=card.get("brand"),
+                                        card_last4=card.get("last4"),
+                                        card_exp_month=card.get("exp_month"),
+                                        card_exp_year=card.get("exp_year"),
+                                        meta_info={"provider_data": pm},
+                                    )
+                                    result["payment_methods"]["created"] += 1
+                        except Exception as e:
+                            result["payment_methods"]["errors"].append(str(e))
+            except Exception as e:
+                result["payment_methods"]["errors"].append(str(e))
+
+        # Convert result payload items into simpler dicts
+        # (ensure errors lists exist)
+        for k, v in result.items():
+            if "errors" not in v or v["errors"] is None:
+                v["errors"] = []
+
+        return {"summary": result}
+
+    async def create_sync_job(self, resources: Optional[List[str]] = None, provider: Optional[str] = None, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Create a SyncJob record and return its basic details.
+
+        Actual work is performed by execute_sync_job which is expected to be
+        scheduled as a background task by the API layer.
+        """
+        if not self.db_session:
+            raise RuntimeError("Database session not set")
+
+        job = await self.sync_job_repo.create(resources=resources, provider=provider, filters=filters)
+        return {"id": job.id, "status": job.status, "created_at": job.created_at.isoformat(), "updated_at": job.updated_at.isoformat()}
+
+    async def execute_sync_job(self, job_id: str):
+        """Run sync_resources for a previously created job and persist results.
+
+        This method will set job status to 'running', invoke sync_resources,
+        and finally store the result and mark job 'completed' or 'failed'.
+        """
+        # For background execution we cannot rely on the request-scoped DB
+        # session. Create a fresh session from the repositories' sessionmaker
+        # and run the job inside it.
+        from ..db.repositories import _sessionmaker  # type: ignore
+
+        if _sessionmaker is None:
+            raise RuntimeError("Database not initialized; cannot run job")
+
+        async with _sessionmaker() as session:
+            # Use a fresh PaymentService instance tied to this session so
+            # repositories use a valid session for the duration of the job.
+            svc = PaymentService(self.config, self.event_publisher, session)
+
+            job = await svc.sync_job_repo.get_by_id(job_id)
+            if not job:
+                raise ValueError(f"Sync job not found: {job_id}")
+
+            # mark running
+            await svc.sync_job_repo.update_status(job_id, "running")
+
+            try:
+                res = await svc.sync_resources(resources=job.resources, provider=job.provider, filters=job.filters)
+                await svc.sync_job_repo.update_status(job_id, "completed", result=res)
+            except Exception as e:
+                await svc.sync_job_repo.update_status(job_id, "failed", result={"error": str(e)})
+                raise
 
     async def refund_payment(
         self, payment_id: str, amount: Optional[float] = None

@@ -22,8 +22,20 @@ class CustomerRepository:
         email: str,
         name: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
+        address: Optional[Dict[str, Any]] = None,
     ) -> Customer:
-        customer = Customer(email=email, name=name, meta_info=meta_info or {})
+        # If an address exists inside meta_info but address param is empty,
+        # move it into the dedicated address column for structured queries.
+        meta_info = dict(meta_info or {})
+        if address:
+            if isinstance(meta_info.get("address"), dict):
+                # remove duplicate from meta_info
+                meta_info.pop("address", None)
+        else:
+            if isinstance(meta_info.get("address"), dict):
+                address = meta_info.pop("address")
+
+        customer = Customer(email=email, name=name, meta_info=meta_info or {}, address=address)
         self.session.add(customer)
         await self.session.commit()
         await self.session.refresh(customer)
@@ -33,6 +45,33 @@ class CustomerRepository:
         customer = await self.get_by_id(customer_id)
         if not customer:
             return None
+        # Normalize address vs meta_info.address: if meta_info contains address,
+        # prefer the explicit address field and remove it from meta_info.
+        if "meta_info" in fields and isinstance(fields["meta_info"], dict):
+            mi = dict(customer.meta_info or {})
+            incoming_mi = dict(fields["meta_info"] or {})
+            # If incoming meta_info has address and address field provided is None,
+            # move it to address. If the caller explicitly provided address as
+            # param then drop the address key from incoming meta_info to avoid
+            # duplication.
+            if "address" in incoming_mi and not fields.get("address"):
+                fields["address"] = incoming_mi.pop("address")
+            elif "address" in incoming_mi and fields.get("address") is not None:
+                # caller provided address explicitly - remove duplicate
+                incoming_mi.pop("address", None)
+            # merge remaining meta_info
+            mi.update(incoming_mi)
+            fields["meta_info"] = mi
+
+        # If an address is being updated but the caller didn't include a
+        # meta_info payload, and the existing stored meta_info contains the
+        # old address, remove it to prevent duplication
+        if "address" in fields and fields.get("address") is not None and "meta_info" not in fields:
+            existing_meta = dict(customer.meta_info or {})
+            if "address" in existing_meta:
+                existing_meta.pop("address", None)
+                fields["meta_info"] = existing_meta
+
         for attr, value in fields.items():
             if value is not None and hasattr(customer, attr):
                 setattr(customer, attr, value)

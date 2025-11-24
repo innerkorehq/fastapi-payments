@@ -58,11 +58,15 @@ class Customer(Base):
         onupdate=datetime.now(timezone.utc),
     )
     meta_info = Column(JSON, nullable=True)
+    # First-class address field stored as JSON (line1, line2, city, state, postal_code, country)
+    address = Column(JSON, nullable=True)
 
     provider_customers = relationship(
         "ProviderCustomer", back_populates="customer")
     subscriptions = relationship("Subscription", back_populates="customer")
     payments = relationship("Payment", back_populates="customer")
+    # Stored payment methods saved on the platform for this customer
+    payment_methods = relationship("PaymentMethod", back_populates="customer")
 
 
 class ProviderCustomer(Base):
@@ -72,9 +76,23 @@ class ProviderCustomer(Base):
     customer_id = Column(String, ForeignKey("customers.id"), nullable=False)
     provider = Column(String, nullable=False)  # stripe, paypal, etc.
     provider_customer_id = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.now(timezone.utc))
 
     customer = relationship("Customer", back_populates="provider_customers")
+
+
+class SyncJob(Base):
+    """Represents an asynchronous synchronization job request."""
+
+    __tablename__ = "sync_jobs"
+
+    id = Column(String, primary_key=True, default=lambda: f"job_{uuid.uuid4().hex[:8]}")
+    status = Column(String, nullable=False, default="queued")
+    resources = Column(JSON, nullable=True)
+    provider = Column(String, nullable=True)
+    filters = Column(JSON, nullable=True)
+    result = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
     __table_args__ = ({"sqlite_autoincrement": True},)
 
@@ -267,3 +285,32 @@ class Payment(Base):
 
     customer = relationship("Customer", back_populates="payments")
     invoice = relationship("Invoice", back_populates="payments")
+
+
+class PaymentMethod(Base):
+    __tablename__ = "payment_methods"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    customer_id = Column(String, ForeignKey("customers.id"), nullable=False)
+    provider = Column(String, nullable=False)
+    # ID of the payment method in the provider (e.g. pm_... for Stripe)
+    provider_payment_method_id = Column(String, nullable=False)
+    # Optional mandate id (created via SetupIntent flows in providers like Stripe)
+    mandate_id = Column(String, nullable=True)
+    is_default = Column(Boolean, default=False)
+
+    # Basic card metadata for convenience & searching (may be null for non-card methods)
+    card_brand = Column(String, nullable=True)
+    card_last4 = Column(String, nullable=True)
+    card_exp_month = Column(Integer, nullable=True)
+    card_exp_year = Column(Integer, nullable=True)
+
+    meta_info = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=datetime.now(timezone.utc),
+        onupdate=datetime.now(timezone.utc),
+    )
+
+    customer = relationship("Customer", back_populates="payment_methods")

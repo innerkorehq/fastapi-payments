@@ -92,6 +92,7 @@ def mock_payment_service():
     service.subscription_repo = MagicMock()
     service.product_repo = MagicMock()
     service.plan_repo = MagicMock()
+    service.sync_job_repo = AsyncMock()
 
     return service
 
@@ -209,3 +210,39 @@ def test_webhook_handler(client, mock_payment_service):
     assert response.status_code == 200
     assert response.json()["status"] == "success"
     mock_payment_service.handle_webhook.assert_called_once()
+
+
+def test_sync_endpoint(client, mock_payment_service):
+    """Test the /payments/sync endpoint schedules a background job and returns a job id."""
+    # Arrange: mock create_sync_job return
+    created_at = datetime.now(timezone.utc).isoformat()
+    job_info = {"id": "job_abc123", "status": "queued", "created_at": created_at, "updated_at": created_at}
+    mock_payment_service.create_sync_job.return_value = job_info
+
+    payload = {"resources": ["customers"], "provider": "stripe", "filters": {"customer_id": "cust_123"}}
+
+    # Act
+    response = client.post("/payments/sync", json=payload)
+
+    # Assert
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == job_info["id"]
+    assert data["status"] == job_info["status"]
+    mock_payment_service.create_sync_job.assert_called_once_with(
+        resources=["customers"], provider="stripe", filters={"customer_id": "cust_123"}
+    )
+
+
+def test_get_sync_job(client, mock_payment_service):
+    """Test GET /payments/sync/{job_id} returns job details from repo."""
+    created_at = datetime.now(timezone.utc)
+    updated_at = created_at
+    # Create a simple object to mimic a DB model with attributes
+    job_obj = type("J", (), {"id": "job_abc123", "status": "completed", "created_at": created_at, "updated_at": updated_at, "result": {"summary": {}}})
+    mock_payment_service.sync_job_repo.get_by_id.return_value = job_obj
+
+    response = client.get("/payments/sync/job_abc123")
+    assert response.status_code == 200
+    assert response.json()["id"] == "job_abc123"
+    assert response.json()["status"] == "completed"

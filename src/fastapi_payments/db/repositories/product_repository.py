@@ -39,3 +39,15 @@ class ProductRepository:
             stmt = stmt.limit(limit)
         result = await self.session.execute(stmt)
         return result.scalars().all()
+
+    async def update(self, product_id: str, **fields: Any) -> Optional[Product]:
+        product = await self.get_by_id(product_id)
+        if not product:
+            return None
+        for attr, value in fields.items():
+            if hasattr(product, attr):
+                setattr(product, attr, value)
+        self.session.add(product)
+        await self.session.commit()
+        await self.session.refresh(product)
+        return product
