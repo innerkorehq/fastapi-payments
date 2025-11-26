@@ -47,3 +47,34 @@ async def test_create_and_list_payment_method_persists(initialize_test_dependenc
         assert any(m["id"] == "pm_test_123" for m in methods)
 
         break
+
+
+@pytest.mark.asyncio
+async def test_list_payment_methods_raises_when_customer_not_linked(initialize_test_dependencies, mock_event_publisher):
+    """If the customer isn't linked to the requested provider, the service should raise ValueError."""
+    cfg = initialize_test_dependencies
+
+    service = PaymentService(cfg, mock_event_publisher, None)
+
+    async for session in get_db():
+        service.set_db_session(session)
+
+        customer_repo = CustomerRepository(session)
+        customer = await customer_repo.create(email="nolink@example.com", name="No Link")
+
+        # Ensure no provider_customer link for 'stripe'
+        with pytest.raises(ValueError):
+            await service.list_payment_methods(customer.id, provider="stripe")
+
+        break
+
+
+@pytest.mark.asyncio
+async def test_list_payment_methods_requires_db_session(initialize_test_dependencies, mock_event_publisher):
+    """Service must have a DB session when listing payment methods (raises RuntimeError)."""
+    cfg = initialize_test_dependencies
+    service = PaymentService(cfg, mock_event_publisher, None)
+
+    # When DB session isn't set, calls that rely on repos should raise
+    with pytest.raises(RuntimeError):
+        await service.list_payment_methods("some_customer_id", provider="stripe")

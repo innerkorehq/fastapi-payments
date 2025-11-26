@@ -310,7 +310,11 @@ class PayUProvider(PaymentProvider):
         payment_method_id: Optional[str] = None,
         description: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
+        mandate_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        # PayU hosted checkout does not use mandate IDs but we accept the
+        # argument so callers (like PaymentService) can pass it without error.
+        _ = mandate_id
         fields = self._build_checkout_fields(amount, currency, description, meta_info)
 
         redirect_payload = {

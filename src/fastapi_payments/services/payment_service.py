@@ -49,12 +49,7 @@ class PaymentService:
 
         # Initialize repositories if session is provided
         if db_session:
-            self.customer_repo = CustomerRepository(db_session)
-            self.payment_repo = PaymentRepository(db_session)
-            self.payment_method_repo = PaymentMethodRepository(db_session)
-            self.subscription_repo = SubscriptionRepository(db_session)
-            self.product_repo = ProductRepository(db_session)
-            self.plan_repo = PlanRepository(db_session)
+            self.set_db_session(db_session)
 
     def set_db_session(self, session: AsyncSession):
         """
@@ -147,6 +142,45 @@ class PaymentService:
                 "id": f"cust_{hash(email) % 10000:04d}",  # Generate a fake ID
                 **customer_data,
             }
+
+    async def ensure_provider_customer(self, customer_id: str, provider: str) -> Dict[str, Any]:
+        """Ensure the customer is registered with the requested provider."""
+        if not self.db_session:
+            raise RuntimeError("Database session not set")
+
+        customer_repo = CustomerRepository(self.db_session)
+        customer = await customer_repo.get_with_provider_customers(customer_id)
+        if not customer:
+            raise ValueError(f"Customer not found: {customer_id}")
+
+        existing = next(
+            (pc for pc in customer.provider_customers if pc.provider == provider),
+            None,
+        )
+        if existing:
+            return {
+                "provider": existing.provider,
+                "provider_customer_id": existing.provider_customer_id,
+            }
+
+        provider_instance = self.get_provider(provider)
+        provider_payload = await provider_instance.create_customer(
+            email=customer.email,
+            name=customer.name,
+            meta_info=customer.meta_info,
+            address=customer.address,
+        )
+        provider_customer_id = provider_payload.get("provider_customer_id") or provider_payload.get("id")
+        if not provider_customer_id:
+            raise ValueError("Provider did not return a customer identifier")
+
+        await customer_repo.add_provider_customer(
+            customer_id=customer_id,
+            provider=provider,
+            provider_customer_id=provider_customer_id,
+        )
+
+        return {"provider": provider, "provider_customer_id": provider_customer_id}
 
     async def get_customer(self, customer_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -1166,6 +1200,7 @@ class PaymentService:
         description: Optional[str] = None,
         meta_info: Optional[Dict[str, Any]] = None,
         mandate_id: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a one-time payment.
@@ -1191,9 +1226,9 @@ class PaymentService:
             raise ValueError(f"Customer not found: {customer_id}")
 
         # Determine provider
-        provider_name = self.default_provider
-        # If payment method ID is provided, extract provider from it
-        if payment_method_id and ":" in payment_method_id:
+        provider_name = provider or self.default_provider
+        # If provider not explicitly requested and payment method encodes it, respect that
+        if not provider and payment_method_id and ":" in payment_method_id:
             provider_name, payment_method_id = payment_method_id.split(":", 1)
 
         # Get provider customer

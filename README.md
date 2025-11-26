@@ -20,6 +20,24 @@ A flexible and extensible payment library for FastAPI applications supporting mu
 - **Highly Configurable**: Extensive configuration options to customize for your needs
 - **Extensible**: Easy to add new payment providers or custom pricing models
 
+## Provider Functionality Status
+
+| Provider | Customer | Products | Plans | Payments & Subscription |
+|----------|----------|----------|-------|-------------------------|
+| Stripe   | ✅       | ✅       | ✅    | ✅                     |
+| PayPal   | ⚠️       | ❌       | ❌    | ❌                     |
+| Adyen    | ❌       | ❌       | ❌    | ❌                      |
+| PayU     | ⚠️       | ⚠️       | ⚠️    | ✅                      |
+
+## Provider Pricing Model Completion
+
+| Provider | Subscription | Usage-based | Tiered pricing | Per-user/seat pricing | Freemium | Dynamic pricing | Hybrid models |
+|----------|--------------|-------------|----------------|-----------------------|----------|-----------------|---------------|
+| Stripe   | ✅           | ❌          | ❌             | ❌                    | ❌       | ❌             | ❌            |
+| PayPal   | ⚠️           | ❌          | ❌             | ❌                    | ❌       | ❌              | ❌            |
+| Adyen    | ❌           | ❌          | ❌             | ❌                    | ❌       | ❌              | ❌            |
+| PayU     | ⚠️           | ❌          | ❌             | ❌                    | ❌       | ❌              | ❌            |
+
 ## Installation
 
 ```bash
@@ -124,6 +142,22 @@ The payment response includes `meta_info.provider_data.payu.redirect` containing
 
 For complete documentation, visit [https://fastapi-payments.readthedocs.io/](https://fastapi-payments.readthedocs.io/)
 
+## Example Project
+Example project implements payment processing functionality using FastAPI.
+
+It provides endpoints for handling payment transactions, including creation,
+processing, and status checking. The implementation supports various payment
+providers and includes error handling and logging.
+
+For a complete example project demonstrating payment integration with FastAPI,
+refer to: https://github.com/innerkorehq/fastapi-payments-example
+
+Usage:
+  - Import the necessary classes and functions.
+  - Configure payment provider settings.
+  - Use the provided endpoints in your FastAPI application.
+
+"""
 ## License
 
 MIT

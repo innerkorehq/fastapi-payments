@@ -48,6 +48,7 @@ class PaymentMethodCreate(BaseModel):
     card: Optional[Dict[str, Any]] = None
     token: Optional[str] = None
     set_default: bool = False
+    provider: Optional[str] = None
 
 
 class PaymentMethodUpdate(BaseModel):
@@ -61,7 +62,7 @@ class PaymentMethodResponse(BaseModel):
     """Schema for payment method response."""
 
     id: str
-    provider: str
+    provider: Optional[str] = None
     type: str
     is_default: bool = False
     card: Optional[Dict[str, Any]] = None
@@ -177,6 +178,7 @@ class PaymentCreate(BaseModel):
     mandate_id: Optional[str] = None
     description: Optional[str] = None
     meta_info: Optional[Dict[str, Any]] = None
+    provider: Optional[str] = None
 
 
 class PaymentResponse(BaseModel):

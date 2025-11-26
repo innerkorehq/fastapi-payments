@@ -117,10 +117,12 @@ async def create_payment_method(
 ) -> Dict[str, Any]:
     """Add a payment method to a customer."""
     try:
+        payload = payment_method.model_dump(exclude_none=True)
+        provider = payload.pop("provider", None)
         result = await payment_service.create_payment_method(
             customer_id=customer_id,
-            # Update from dict() to model_dump()
-            payment_details=payment_method.model_dump(),
+            payment_details=payload,
+            provider=provider,
         )
         return result
     except Exception as e:
@@ -203,10 +205,11 @@ async def delete_payment_method(
 )
 async def list_payment_methods(
     customer_id: str,
+    provider: Optional[str] = Query(None, description="Filter by provider name"),
     payment_service: PaymentService = Depends(get_payment_service_with_db),
 ) -> List[Dict[str, Any]]:
     """List payment methods for a customer."""
-    result = await payment_service.list_payment_methods(customer_id)
+    result = await payment_service.list_payment_methods(customer_id, provider=provider)
     return result
 
 
@@ -459,6 +462,7 @@ async def process_payment(
             payment_method_id=payment.payment_method_id,
             description=payment.description,
             meta_info=payment.meta_info,
+            provider=payment.provider,
         )
         return result
     except Exception as e:

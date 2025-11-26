@@ -76,3 +76,20 @@ async def test_process_payment_requires_contact_details(payu_provider):
                 "customer_context": {},
             },
         )
+
+
+@pytest.mark.asyncio
+async def test_process_payment_accepts_mandate_id(payu_provider):
+    """Should accept a mandate_id kw without raising even though PayU ignores it."""
+    result = await payu_provider.process_payment(
+        amount=20.0,
+        currency="INR",
+        provider_customer_id="cust_mandate",
+        meta_info={
+            "payu": {"firstname": "Alice", "email": "alice@example.com", "productinfo": "Buy", "txnid": "tx_1"},
+            "customer_context": {"name": "Alice", "email": "alice@example.com"},
+        },
+        mandate_id="mand_12345",
+    )
+
+    assert "meta_info" in result and "redirect" in result["meta_info"]
