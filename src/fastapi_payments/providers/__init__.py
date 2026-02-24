@@ -80,6 +80,16 @@ def get_provider(
 
             provider_class = PayUProvider
 
+        elif provider_name == "cashfree":
+            from .cashfree import CashfreeProvider
+
+            provider_class = CashfreeProvider
+
+        elif provider_name == "razorpay":
+            from .razorpay import RazorpayProvider
+
+            provider_class = RazorpayProvider
+
         else:
             raise ValueError(f"Unsupported payment provider: {provider_name}")
 

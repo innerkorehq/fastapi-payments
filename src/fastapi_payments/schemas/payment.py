@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, EmailStr, field_validator
+from pydantic import BaseModel, Field, EmailStr, validator
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
@@ -85,7 +85,7 @@ class ProductResponse(BaseModel):
     name: str
     description: Optional[str] = None
     active: bool
-    provider_product_id: str
+    provider_product_id: Optional[str] = None
     provider: str
     created_at: str
     meta_info: Optional[Dict[str, Any]] = None
@@ -104,7 +104,7 @@ class PlanCreate(BaseModel):
     trial_period_days: Optional[int] = None
     meta_info: Optional[Dict[str, Any]] = None
 
-    @field_validator("pricing_model")
+    @validator("pricing_model")
     @classmethod
     def validate_pricing_model(cls, v):
         """Validate pricing model."""
@@ -136,7 +136,7 @@ class PlanResponse(BaseModel):
     billing_interval_count: Optional[int] = None
     trial_period_days: Optional[int] = None
     provider: str
-    provider_price_id: str
+    provider_price_id: Optional[str] = None
     created_at: str
     meta_info: Optional[Dict[str, Any]] = None
 
@@ -161,11 +161,12 @@ class SubscriptionResponse(BaseModel):
     provider_subscription_id: str
     status: str
     quantity: int
-    current_period_start: str
+    current_period_start: Optional[str] = None
     current_period_end: Optional[str] = None
     cancel_at_period_end: bool
     created_at: str
     provider_data: Optional[Dict[str, Any]] = None
+    meta_info: Optional[Dict[str, Any]] = None
 
 
 class PaymentCreate(BaseModel):

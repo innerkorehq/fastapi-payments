@@ -1,4 +1,4 @@
-# Work in Progress (Not ready for usage)
+# Work in Progress (Read Provider Metrices for usage)
 
 # FastAPI Payments Library
 
@@ -28,6 +28,7 @@ A flexible and extensible payment library for FastAPI applications supporting mu
 | PayPal   | ⚠️       | ❌       | ❌    | ❌                     |
 | Adyen    | ❌       | ❌       | ❌    | ❌                      |
 | PayU     | ⚠️       | ⚠️       | ⚠️    | ✅                      |
+| Cashfree | ⚠️       | ⚠️       | ⚠️    | ✅                      |
 
 ## Provider Pricing Model Completion
 
@@ -36,7 +37,8 @@ A flexible and extensible payment library for FastAPI applications supporting mu
 | Stripe   | ✅           | ❌          | ❌             | ❌                    | ❌       | ❌             | ❌            |
 | PayPal   | ⚠️           | ❌          | ❌             | ❌                    | ❌       | ❌              | ❌            |
 | Adyen    | ❌           | ❌          | ❌             | ❌                    | ❌       | ❌              | ❌            |
-| PayU     | ⚠️           | ❌          | ❌             | ❌                    | ❌       | ❌              | ❌            |
+| PayU     | ✅           | ❌          | ❌             | ❌                    | ❌       | ❌              | ❌            |
+| Cashfree | ✅           | ❌          | ❌             | ❌                    | ❌       | ❌              | ❌            |
 
 ## Installation
 

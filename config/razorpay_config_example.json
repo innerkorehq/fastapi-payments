@@ -1,0 +1,13 @@
+{
+  "razorpay": {
+    "api_key": "rzp_test_xxxxxxxxxxxx",
+    "api_secret": "your_key_secret_here",
+    "webhook_secret": "your_webhook_secret_here",
+    "sandbox_mode": true,
+    "additional_settings": {
+      "default_currency": "INR",
+      "return_url": "https://yoursite.com/payment/success",
+      "notify_url": "https://yoursite.com/webhooks/razorpay"
+    }
+  }
+}

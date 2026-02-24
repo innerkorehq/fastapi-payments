@@ -698,35 +698,63 @@ class PaymentService:
             raise RuntimeError("Database session not set")
 
         provider_name = provider or self.default_provider
+        logger.info(f"Creating product with provider_name={provider_name}, provider={provider}, default={self.default_provider}")
         provider_instance = self.get_provider(provider_name)
 
-        # Create product in provider
-        provider_product = await provider_instance.create_product(
-            name=name, description=description, meta_info=meta_info
-        )
+        # For PayU, we don't create products via API - just store locally
+        if provider_name == "payu":
+            # PayU doesn't have a product API, just store product locally
+            product_repo = ProductRepository(self.db_session)
+            product = await product_repo.create(
+                name=name,
+                description=description,
+                meta_info={
+                    **(meta_info or {}),
+                    "provider": provider_name,
+                    # No provider_product_id for PayU
+                },
+            )
+            
+            # Return product data
+            return {
+                "id": product.id,
+                "name": product.name,
+                "description": product.description,
+                "active": product.active,
+                "provider": provider_name,
+                "created_at": product.created_at.isoformat(),
+                "meta_info": product.meta_info,
+            }
+        else:
+            # For Stripe and other providers, create product via API
+            # Create product in provider
+            provider_product = await provider_instance.create_product(
+                name=name, description=description, meta_info=meta_info
+            )
 
-        # Create product in database
-        product_repo = ProductRepository(self.db_session)
-        product = await product_repo.create(
-            name=name,
-            description=description,
-            meta_info={
-                **(meta_info or {}),
+            # Create product in database
+            product_repo = ProductRepository(self.db_session)
+            product = await product_repo.create(
+                name=name,
+                description=description,
+                meta_info={
+                    **(meta_info or {}),
+                    "provider_product_id": provider_product["provider_product_id"],
+                    "provider": provider_name,
+                },
+            )
+
+            # Return combined data
+            return {
+                "id": product.id,
+                "name": product.name,
+                "description": product.description,
+                "active": product.active,
                 "provider_product_id": provider_product["provider_product_id"],
                 "provider": provider_name,
-            },
-        )
-
-        # Return combined data
-        return {
-            "id": product.id,
-            "name": product.name,
-            "description": product.description,
-            "active": product.active,
-            "provider_product_id": provider_product["provider_product_id"],
-            "provider": provider_name,
-            "created_at": product.created_at.isoformat(),
-        }
+                "created_at": product.created_at.isoformat(),
+                "meta_info": product.meta_info,
+            }
 
     async def list_products(
         self,
@@ -805,60 +833,89 @@ class PaymentService:
 
         # Get provider product ID from meta_info
         provider_product_id = product.meta_info.get("provider_product_id")
-        if not provider_product_id:
-            raise ValueError(
-                f"Provider product ID not found for product {product_id}")
+        
+        # For PayU, we don't create prices via API - just store locally
+        if provider_name == "payu":
+            # PayU doesn't have a price/plan API, just store plan locally
+            plan_repo = PlanRepository(self.db_session)
+            plan = await plan_repo.create(
+                product_id=product_id,
+                name=name,
+                description=description,
+                pricing_model=pricing_model,
+                amount=amount,
+                currency=currency,
+                billing_interval=billing_interval,
+                billing_interval_count=billing_interval_count,
+                trial_period_days=trial_period_days,
+                is_active=True,
+                meta_info={
+                    **(meta_info or {}),
+                    "provider": provider_name,
+                    # No provider_price_id for PayU since it doesn't have this concept
+                },
+            )
+        else:
+            # For Stripe and other providers, create price via API
+            if not provider_product_id:
+                raise ValueError(
+                    f"Provider product ID not found for product {product_id}")
 
-        # Create price in provider
-        provider_price = await provider_instance.create_price(
-            product_id=provider_product_id,
-            amount=amount,
-            currency=currency,
-            interval=billing_interval,
-            interval_count=billing_interval_count,
-            meta_info={
-                **(meta_info or {}),
-                "name": name,
-                "pricing_model": pricing_model,
-            },
-        )
+            # Create price in provider
+            provider_price = await provider_instance.create_price(
+                product_id=provider_product_id,
+                amount=amount,
+                currency=currency,
+                interval=billing_interval,
+                interval_count=billing_interval_count,
+                meta_info={
+                    **(meta_info or {}),
+                    "name": name,
+                    "pricing_model": pricing_model,
+                },
+            )
 
-        # Create plan in database
-        plan_repo = PlanRepository(self.db_session)
-        plan = await plan_repo.create(
-            product_id=product_id,
-            name=name,
-            description=description,
-            pricing_model=pricing_model,
-            amount=amount,
-            currency=currency,
-            billing_interval=billing_interval,
-            billing_interval_count=billing_interval_count,
-            trial_period_days=trial_period_days,
-            is_active=True,
-            meta_info={
-                **(meta_info or {}),
-                "provider": provider_name,
-                "provider_price_id": provider_price["provider_price_id"],
-            },
-        )
+            # Create plan in database
+            plan_repo = PlanRepository(self.db_session)
+            plan = await plan_repo.create(
+                product_id=product_id,
+                name=name,
+                description=description,
+                pricing_model=pricing_model,
+                amount=amount,
+                currency=currency,
+                billing_interval=billing_interval,
+                billing_interval_count=billing_interval_count,
+                trial_period_days=trial_period_days,
+                is_active=True,
+                meta_info={
+                    **(meta_info or {}),
+                    "provider": provider_name,
+                    "provider_price_id": provider_price["provider_price_id"],
+                },
+            )
 
         # Return combined data
-        return {
+        result = {
             "id": plan.id,
             "product_id": plan.product_id,
             "name": plan.name,
             "description": plan.description,
-            "pricing_model": plan.pricing_model,
+            "pricing_model": plan.pricing_model.value if plan.pricing_model else pricing_model,
             "amount": plan.amount,
             "currency": plan.currency,
             "billing_interval": plan.billing_interval,
             "billing_interval_count": plan.billing_interval_count,
             "trial_period_days": plan.trial_period_days,
             "provider": provider_name,
-            "provider_price_id": provider_price["provider_price_id"],
             "created_at": plan.created_at.isoformat(),
         }
+        
+        # Add provider_price_id only if it exists (not for PayU)
+        if plan.meta_info and "provider_price_id" in plan.meta_info:
+            result["provider_price_id"] = plan.meta_info["provider_price_id"]
+        
+        return result
 
     async def list_plans(
         self,
@@ -926,6 +983,8 @@ class PaymentService:
         Returns:
             Created subscription data
         """
+        logger.info(f"create_subscription called with customer_id={customer_id}, plan_id={plan_id}, meta_info keys={list((meta_info or {}).keys())}")
+        
         if not self.db_session:
             raise RuntimeError("Database session not set")
 
@@ -942,23 +1001,71 @@ class PaymentService:
         if not customer:
             raise ValueError(f"Customer not found: {customer_id}")
 
-        # Get provider from plan meta_info
-        provider_name = plan.meta_info.get("provider")
+        # Get provider from plan meta_info or from passed meta_info
+        provider_name = (meta_info or {}).get("provider") or plan.meta_info.get("provider")
         provider_price_id = plan.meta_info.get("provider_price_id")
+        
+        logger.info(f"Provider resolution: meta_info provider={meta_info.get('provider') if meta_info else None}, plan provider={plan.meta_info.get('provider')}, resolved provider={provider_name}")
+        logger.info(f"Plan meta_info: {plan.meta_info}")
 
-        if not provider_name or not provider_price_id:
+        # For PayU, we don't need provider_price_id since we don't create prices in external APIs
+        if provider_name == "payu":
+            # PayU doesn't require provider_price_id, just create subscription directly
+            pass
+        elif not provider_name or not provider_price_id:
             raise ValueError(f"Provider info not found for plan {plan_id}")
 
         # Get provider customer
         provider_customer = await customer_repo.get_provider_customer(
             customer_id, provider_name
         )
+        
+        # For PayU and similar hosted providers, auto-create provider customer if not exists
         if not provider_customer:
-            raise ValueError(
-                f"Customer not found for provider {provider_name}")
+            logger.info(f"Provider customer not found for {provider_name}, creating one")
+            provider_instance = self.get_provider(provider_name)
+            provider_customer_data = await provider_instance.create_customer(
+                email=customer.email,
+                name=customer.name,
+                meta_info=meta_info,
+            )
+            
+            # Create provider customer link in database
+            provider_customer = await customer_repo.add_provider_customer(
+                customer_id=customer_id,
+                provider=provider_name,
+                provider_customer_id=provider_customer_data["provider_customer_id"],
+            )
 
         # Create subscription in provider
         provider_instance = self.get_provider(provider_name)
+        
+        # For PayU, ensure amount is in meta_info as it's required for SI
+        if provider_name == "payu":
+            meta_info = meta_info or {}
+            if "amount" not in meta_info:
+                meta_info["amount"] = plan.amount
+            
+            # Also inject customer context
+            if "customer_context" not in meta_info:
+                meta_info["customer_context"] = {
+                    "name": customer.name,
+                    "email": customer.email,
+                }
+        
+        # For Cashfree, inject customer context
+        if provider_name == "cashfree":
+            meta_info = meta_info or {}
+            if "customer_context" not in meta_info:
+                meta_info["customer_context"] = {
+                    "name": customer.name,
+                    "email": customer.email,
+                    "phone": customer.meta_info.get("phone") if customer.meta_info else None,
+                }
+        
+        logger.info(f"Calling {provider_name}.create_subscription with provider_customer_id={provider_customer.provider_customer_id}, price_id={provider_price_id}")
+        logger.info(f"Passing meta_info to provider: {meta_info}")
+        
         provider_subscription = await provider_instance.create_subscription(
             provider_customer_id=provider_customer.provider_customer_id,
             price_id=provider_price_id,
@@ -966,6 +1073,13 @@ class PaymentService:
             trial_period_days=trial_period_days or plan.trial_period_days,
             meta_info=meta_info,
         )
+        
+        logger.info(f"Provider {provider_name} returned subscription: status={provider_subscription.get('status')}, has_meta_info={provider_subscription.get('meta_info') is not None}")
+        logger.info(f"Provider subscription meta_info keys: {list((provider_subscription.get('meta_info') or {}).keys())}")
+        if provider_subscription.get('meta_info', {}).get('redirect'):
+            logger.info(f"REDIRECT INFO FOUND in provider response: {provider_subscription['meta_info']['redirect'].get('action_url')}")
+        else:
+            logger.warning(f"NO REDIRECT INFO in provider response for {provider_name}")
 
         # Create subscription in database
         subscription_repo = SubscriptionRepository(self.db_session)
@@ -989,6 +1103,21 @@ class PaymentService:
                 else provider_subscription["current_period_end"]
             )
 
+        # Build a normalised redirect dict so the frontend can handle all
+        # providers the same way.
+        # - PayU: provider sets meta_info["redirect"] directly (form POST).
+        # - Razorpay: provider returns short_url / auth_link (simple GET redirect).
+        provider_meta = provider_subscription.get("meta_info") or {}
+        redirect_info = provider_meta.get("redirect")
+        if not redirect_info:
+            auth_url = provider_meta.get("short_url") or provider_meta.get("auth_link")
+            if auth_url:
+                redirect_info = {
+                    "method": "GET",
+                    "action_url": auth_url,
+                    "fields": {},
+                }
+
         subscription = await subscription_repo.create(
             customer_id=customer_id,
             plan_id=plan_id,
@@ -1003,9 +1132,16 @@ class PaymentService:
             ),
             meta_info={
                 **(meta_info or {}),
-                "provider_data": {"items": provider_subscription.get("items", [])},
+                "provider_data": provider_subscription,  # Store full provider response
+                "redirect": redirect_info,
             },
         )
+        
+        logger.info(f"Subscription created in DB with id={subscription.id}, meta_info keys={list((subscription.meta_info or {}).keys())}")
+        if subscription.meta_info.get('redirect'):
+            logger.info(f"Subscription DB meta_info HAS redirect: {subscription.meta_info['redirect'].get('action_url')}")
+        else:
+            logger.warning(f"Subscription DB meta_info MISSING redirect")
 
         # Publish event
         await self.event_publisher.publish_event(
@@ -1022,7 +1158,7 @@ class PaymentService:
         )
 
         # Return combined data
-        return {
+        result = {
             "id": subscription.id,
             "customer_id": subscription.customer_id,
             "plan_id": subscription.plan_id,
@@ -1030,7 +1166,11 @@ class PaymentService:
             "provider_subscription_id": subscription.provider_subscription_id,
             "status": subscription.status,
             "quantity": subscription.quantity,
-            "current_period_start": subscription.current_period_start.isoformat(),
+            "current_period_start": (
+                subscription.current_period_start.isoformat()
+                if subscription.current_period_start
+                else None
+            ),
             "current_period_end": (
                 subscription.current_period_end.isoformat()
                 if subscription.current_period_end
@@ -1038,7 +1178,16 @@ class PaymentService:
             ),
             "cancel_at_period_end": subscription.cancel_at_period_end,
             "created_at": subscription.created_at.isoformat(),
+            "meta_info": subscription.meta_info or {},
         }
+        
+        logger.info(f"Returning subscription with meta_info keys: {list((result.get('meta_info') or {}).keys())}")
+        if result.get('meta_info', {}).get('redirect'):
+            logger.info(f"RETURN VALUE HAS REDIRECT: {result['meta_info']['redirect'].get('action_url')}")
+        else:
+            logger.warning(f"RETURN VALUE MISSING REDIRECT for provider {provider_name}")
+        
+        return result
 
     async def get_subscription(self, subscription_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -1079,7 +1228,11 @@ class PaymentService:
             "provider_subscription_id": subscription.provider_subscription_id,
             "status": subscription.status,
             "quantity": subscription.quantity,
-            "current_period_start": subscription.current_period_start.isoformat(),
+            "current_period_start": (
+                subscription.current_period_start.isoformat()
+                if subscription.current_period_start
+                else None
+            ),
             "current_period_end": (
                 subscription.current_period_end.isoformat()
                 if subscription.current_period_end
@@ -1088,6 +1241,7 @@ class PaymentService:
             "cancel_at_period_end": subscription.cancel_at_period_end,
             "created_at": subscription.created_at.isoformat(),
             "provider_data": provider_subscription,
+            "meta_info": subscription.meta_info,
         }
 
     async def list_subscriptions(

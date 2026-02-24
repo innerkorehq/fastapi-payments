@@ -1,5 +1,5 @@
 from typing import Dict, Any, Optional, List
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, validator
 
 
 class TaxConfig(BaseModel):
@@ -41,7 +41,7 @@ class MessagingConfig(BaseModel):
     topic_prefix: Optional[str] = "payments."
     group_id: Optional[str] = "payment-service"
 
-    @field_validator("broker_type")
+    @validator("broker_type")
     @classmethod
     def validate_broker_type(cls, v):
         """Validate broker type."""
@@ -76,15 +76,15 @@ class PaymentConfig(BaseModel):
     allowed_currencies: List[str] = ["USD", "EUR", "GBP"]
     additional_settings: Dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("default_provider")
+    @validator("default_provider")
     @classmethod
-    def validate_default_provider(cls, v, info):
+    def validate_default_provider(cls, v, values):
         """Validate default provider exists in providers."""
-        if v not in info.data.get("providers", {}):
+        if "providers" in values and v not in values["providers"]:
             raise ValueError(f"default_provider '{v}' must exist in providers")
         return v
 
-    @field_validator("logging_level")
+    @validator("logging_level")
     @classmethod
     def validate_logging_level(cls, v):
         """Validate logging level."""

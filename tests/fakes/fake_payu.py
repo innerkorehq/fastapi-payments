@@ -98,7 +98,6 @@ class FakePayU:
             "phone": (meta_info.get("payu", {}) or {}).get("phone", ""),
             "surl": (meta_info.get("payu", {}) or {}).get("surl", "https://example.test/success"),
             "furl": (meta_info.get("payu", {}) or {}).get("furl", "https://example.test/failure"),
-            "service_provider": "payu_paisa",
         }
 
         # add udf fields

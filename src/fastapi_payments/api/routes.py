@@ -231,10 +231,16 @@ async def create_product(
 ) -> Dict[str, Any]:
     """Create a new product."""
     try:
+        # Extract provider from meta_info if provided
+        provider = None
+        if product.meta_info:
+            provider = product.meta_info.get("provider")
+        
         result = await payment_service.create_product(
             name=product.name,
             description=product.description,
             meta_info=product.meta_info,
+            provider=provider,
         )
         return result
     except Exception as e:
@@ -281,6 +287,11 @@ async def create_plan(
 ) -> Dict[str, Any]:
     """Create a new price plan for a product."""
     try:
+        # Extract provider from meta_info if provided
+        provider = None
+        if plan.meta_info:
+            provider = plan.meta_info.get("provider")
+        
         result = await payment_service.create_plan(
             product_id=product_id,
             name=plan.name,
@@ -292,6 +303,7 @@ async def create_plan(
             billing_interval_count=plan.billing_interval_count,
             trial_period_days=plan.trial_period_days,
             meta_info=plan.meta_info,
+            provider=provider,
         )
         return result
     except Exception as e:
@@ -342,16 +354,36 @@ async def list_customer_subscriptions(
 async def create_subscription(
     customer_id: str,
     subscription: SubscriptionCreate,
+    request: Request,
     payment_service: PaymentService = Depends(get_payment_service_with_db),
 ) -> Dict[str, Any]:
-    """Subscribe a customer to a plan."""
+    """Subscribe a customer to a plan.
+
+    Accept both `meta_info` and `metadata` (alias) from the request body to be
+    tolerant of different client payload shapes.
+    """
     try:
+        # Prefer explicit meta_info from Pydantic model, but fall back to raw body
+        meta_info = subscription.meta_info
+        if not meta_info:
+            try:
+                body = await request.json()
+                # Allow clients that send `metadata` (common naming) to work
+                meta_info = body.get("meta_info") or body.get("metadata")
+            except Exception:
+                meta_info = None
+
+        # Extract provider if present
+        provider = None
+        if meta_info:
+            provider = meta_info.get("provider")
+
         result = await payment_service.create_subscription(
             customer_id=customer_id,
             plan_id=subscription.plan_id,
             quantity=subscription.quantity,
             trial_period_days=subscription.trial_period_days,
-            meta_info=subscription.meta_info,
+            meta_info=meta_info,
         )
         return result
     except Exception as e:

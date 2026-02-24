@@ -1,8 +1,11 @@
 .PHONY: clean build test lint upload-test upload docs
 
-PYTHON := python3
-PIP := pip
-PYTEST := pytest
+# Prefer the project-local virtualenv so tests always use pinned dependencies
+# and don't pick up incompatible packages from a global/conda environment.
+VENV_DIR := .venv
+PYTHON := $(if $(wildcard $(VENV_DIR)/bin/python),$(VENV_DIR)/bin/python,python3)
+PIP := $(if $(wildcard $(VENV_DIR)/bin/pip),$(VENV_DIR)/bin/pip,pip)
+PYTEST := $(if $(wildcard $(VENV_DIR)/bin/pytest),$(VENV_DIR)/bin/pytest,pytest)
 TWINE := twine
 
 clean:
