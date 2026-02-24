@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fastapi-payments"
-version = "0.1.4"
+version = "0.1.5"
 description = "A flexible and extensible payment library for FastAPI"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -43,7 +43,7 @@ stripe = ["stripe>=6.0.0"]
 paypal = ["paypalrestsdk>=1.13.1"]
 adyen = ["Adyen>=13.0.0"]
 cashfree = ["cashfree_pg>=4.0.0"]
-razorpay = ["razorpay>=1.4.0"]
+razorpay = ["razorpay>=2.0.0"]
 payu = []
 rabbitmq = ["faststream[rabbit]>=0.2.0"]
 kafka = ["faststream[kafka]>=0.2.0"]
@@ -53,7 +53,7 @@ all = [
     "paypalrestsdk>=1.13.1",
     "Adyen>=13.0.0",
     "cashfree_pg>=4.0.0",
-    "razorpay>=1.4.0",
+    "razorpay>=2.0.0",
     "faststream[rabbit,kafka,redis,nats]>=0.2.0"
 ]
 dev = [

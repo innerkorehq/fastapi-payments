@@ -483,6 +483,98 @@ async def test_delete_customer(razorpay_provider):
 
 
 @pytest.mark.asyncio
+async def test_create_subscription_checkout_config(razorpay_provider):
+    """Subscription response includes checkout_config for Razorpay Checkout JS."""
+    customer = await razorpay_provider.create_customer(
+        email="checkout@example.com",
+        name="Checkout User",
+        meta_info={"phone": "9999999999"},
+    )
+    plan = await razorpay_provider.create_price(
+        product_id="test_product",
+        amount=999.0,
+        currency="INR",
+        interval="month",
+    )
+    result = await razorpay_provider.create_subscription(
+        provider_customer_id=customer["provider_customer_id"],
+        price_id=plan["provider_price_id"],
+        meta_info={
+            "merchant_name": "Acme Corp",
+            "description": "Monthly Plan",
+            "email": "checkout@example.com",
+            "phone": "9999999999",
+            "total_count": 12,
+        },
+    )
+
+    checkout = result["meta_info"]["checkout_config"]
+    assert checkout["key"] == "test_key_id"
+    assert checkout["subscription_id"] == result["provider_subscription_id"]
+    assert checkout["name"] == "Acme Corp"
+    assert checkout["description"] == "Monthly Plan"
+    assert checkout["prefill"]["email"] == "checkout@example.com"
+    assert checkout["prefill"]["contact"] == "9999999999"
+
+
+@pytest.mark.asyncio
+async def test_process_payment_checkout_config(razorpay_provider):
+    """Order response includes checkout_config for Razorpay Checkout JS."""
+    result = await razorpay_provider.process_payment(
+        amount=500.0,
+        currency="INR",
+        description="Test purchase",
+        meta_info={
+            "merchant_name": "My Store",
+            "email": "buyer@example.com",
+        },
+    )
+
+    checkout = result["meta_info"]["checkout_config"]
+    assert checkout["key"] == "test_key_id"
+    assert checkout["order_id"] == result["provider_payment_id"]
+    assert checkout["amount"] == 500 * 100  # paise
+    assert checkout["currency"] == "INR"
+    assert checkout["name"] == "My Store"
+    assert checkout["description"] == "Test purchase"
+    assert checkout["prefill"]["email"] == "buyer@example.com"
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_signature_order(razorpay_provider):
+    """Verify signature for one-time order checkout."""
+    # HMAC-SHA256 of "order_test456|pay_test123" with key "test_key_secret"
+    ok = razorpay_provider.verify_payment_signature(
+        razorpay_payment_id="pay_test123",
+        razorpay_order_id="order_test456",
+        razorpay_signature="aec0fd8a1f6525ecdc6f7c2a23bc4e9b05613f2f031904328fada38e64d840b2",
+    )
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_signature_subscription(razorpay_provider):
+    """Verify signature for subscription checkout."""
+    # HMAC-SHA256 of \"pay_test123|sub_test456\" with key \"test_key_secret\"
+    ok = razorpay_provider.verify_payment_signature(
+        razorpay_payment_id="pay_test123",
+        razorpay_subscription_id="sub_test456",
+        razorpay_signature="4b2e27ba31e664d7000d0710fb9dd4ed21351969e7afc99c365c603d443bb0dd",
+    )
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_signature_missing_ids(razorpay_provider):
+    """verify_payment_signature raises ValueError when neither id is provided."""
+    with pytest.raises(ValueError, match="Either razorpay_order_id or razorpay_subscription_id"):
+        razorpay_provider.verify_payment_signature(
+            razorpay_payment_id="pay_test123",
+            razorpay_signature="dummy_sig",
+        )
+
+
+@pytest.mark.asyncio
 async def test_amount_conversion(razorpay_provider):
     """Test amount conversion to/from paise."""
     # Test to paise

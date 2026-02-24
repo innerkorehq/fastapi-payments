@@ -1109,7 +1109,13 @@ class PaymentService:
         # - Razorpay: provider returns short_url / auth_link (simple GET redirect).
         provider_meta = provider_subscription.get("meta_info") or {}
         redirect_info = provider_meta.get("redirect")
-        if not redirect_info:
+
+        # Bubble up checkout_config from the provider response so it lands at
+        # the top-level of stored meta_info and is visible to _subscription_payload.
+        checkout_config = provider_meta.get("checkout_config")
+
+        # Only use short_url as a redirect fallback when Checkout JS is unavailable.
+        if not redirect_info and not checkout_config:
             auth_url = provider_meta.get("short_url") or provider_meta.get("auth_link")
             if auth_url:
                 redirect_info = {
@@ -1134,6 +1140,7 @@ class PaymentService:
                 **(meta_info or {}),
                 "provider_data": provider_subscription,  # Store full provider response
                 "redirect": redirect_info,
+                "checkout_config": checkout_config,  # Razorpay Checkout JS config (top-level)
             },
         )
         
@@ -1419,6 +1426,9 @@ class PaymentService:
         if provider_payment.get("meta_info"):
             combined_meta_info.setdefault("provider_data", {})
             combined_meta_info["provider_data"][provider_name] = provider_payment["meta_info"]
+            # Bubble up checkout_config to the top level so _payment_payload can find it.
+            if provider_payment["meta_info"].get("checkout_config"):
+                combined_meta_info["checkout_config"] = provider_payment["meta_info"]["checkout_config"]
         stored_meta_info = combined_meta_info or None
 
         # Create payment in database

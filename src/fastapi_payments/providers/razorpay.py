@@ -20,11 +20,21 @@ class RazorpayProvider(PaymentProvider):
     Supports:
     - Customer management
     - Plan/subscription management via Razorpay's subscription API
-    - One-time payments via Orders and Payment Links
+    - One-time payments via Orders (Razorpay Checkout JS on the frontend)
     - Webhook handling with signature verification
-    
+
+    Frontend checkout (preferred over subscription_link/short_url redirect):
+    - Subscriptions: backend returns checkout_config with key + subscription_id;
+      frontend uses Razorpay Checkout JS (https://checkout.razorpay.com/v1/checkout.js)
+      with ``subscription_id`` to open the payment modal.
+    - One-time orders: backend returns checkout_config with key + order_id + amount;
+      frontend uses Razorpay Checkout JS with ``order_id`` to open the payment modal.
+
+    Requires razorpay>=2.0.0 (pip install razorpay>=2.0.0)
+
     Razorpay API Documentation:
     - Subscriptions: https://razorpay.com/docs/payments/subscriptions/
+    - Checkout JS: https://razorpay.com/docs/payments/payment-gateway/web-integration/standard/
     - Customers: https://razorpay.com/docs/api/customers/
     - Plans: https://razorpay.com/docs/api/payments/subscriptions/plans/
     """
@@ -67,8 +77,8 @@ class RazorpayProvider(PaymentProvider):
             import razorpay
         except ImportError:
             raise ImportError(
-                "razorpay is required for Razorpay provider. "
-                "Install it with: pip install razorpay"
+                "razorpay>=2.0.0 is required for Razorpay provider. "
+                "Install it with: pip install 'razorpay>=2.0.0'"
             )
         
         # Client credentials
@@ -500,11 +510,20 @@ class RazorpayProvider(PaymentProvider):
                 "created_at": self._timestamp_to_iso(subscription.get("created_at")),
                 "meta_info": {
                     "razorpay_response": subscription,
-                    "short_url": subscription.get("short_url"),  # Authorization link
+                    # short_url is the Razorpay-hosted subscription link (fallback only).
+                    # Prefer using checkout_config below for the Razorpay Checkout JS flow.
+                    "short_url": subscription.get("short_url"),
                     "auth_link": subscription.get("short_url"),
                     "total_count": subscription.get("total_count"),
                     "paid_count": subscription.get("paid_count"),
                     "remaining_count": subscription.get("remaining_count"),
+                    # ---- Razorpay Checkout JS config (frontend modal) ----
+                    # Pass this object directly to `new Razorpay(checkout_config).open()`
+                    # Add a `handler` function on the frontend to capture the payment response.
+                    "checkout_config": self._build_subscription_checkout_config(
+                        subscription_id=subscription.get("id"),
+                        meta_info=meta_info,
+                    ),
                 },
             }
         except Exception as e:
@@ -681,6 +700,16 @@ class RazorpayProvider(PaymentProvider):
                     "razorpay_response": order,
                     "order_id": order.get("id"),
                     "receipt": order.get("receipt"),
+                    # ---- Razorpay Checkout JS config (frontend modal) ----
+                    # Pass this object directly to `new Razorpay(checkout_config).open()`
+                    # Add a `handler` function on the frontend to capture the payment response.
+                    "checkout_config": self._build_order_checkout_config(
+                        order_id=order.get("id"),
+                        amount_paise=order.get("amount", self._to_razorpay_amount(amount, currency)),
+                        currency=currency,
+                        description=description,
+                        meta_info=meta_info,
+                    ),
                 },
             }
         except Exception as e:
@@ -764,6 +793,158 @@ class RazorpayProvider(PaymentProvider):
     # ------------------------------------------------------------------
     # Additional Razorpay-specific methods
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Razorpay Checkout JS helpers
+    # ------------------------------------------------------------------
+    def _build_subscription_checkout_config(
+        self,
+        subscription_id: str,
+        meta_info: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build the options dict for Razorpay Checkout JS (subscription flow).
+
+        Frontend usage::
+
+            <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+            <script>
+              const options = {{ checkout_config | tojson }};
+              options.handler = function(response) {
+                // response.razorpay_payment_id
+                // response.razorpay_subscription_id
+                // response.razorpay_signature
+                // POST these to your backend /verify-payment endpoint
+              };
+              new Razorpay(options).open();
+            </script>
+        """
+        meta_info = meta_info or {}
+        config: Dict[str, Any] = {
+            "key": self.key_id,
+            "subscription_id": subscription_id,
+            "name": meta_info.get("merchant_name", ""),
+            "description": meta_info.get("description", ""),
+        }
+        # Optional prefill from meta_info
+        prefill = {
+            k: meta_info[k]
+            for k in ("name", "email", "contact", "phone")
+            if meta_info.get(k)
+        }
+        if "phone" in prefill and "contact" not in prefill:
+            prefill["contact"] = prefill.pop("phone")
+        if prefill:
+            config["prefill"] = prefill
+        return config
+
+    def _build_order_checkout_config(
+        self,
+        order_id: str,
+        amount_paise: int,
+        currency: str,
+        description: Optional[str] = None,
+        meta_info: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build the options dict for Razorpay Checkout JS (order/one-time flow).
+
+        Frontend usage::
+
+            <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+            <script>
+              const options = {{ checkout_config | tojson }};
+              options.handler = function(response) {
+                // response.razorpay_payment_id
+                // response.razorpay_order_id
+                // response.razorpay_signature
+                // POST these to your backend /verify-payment endpoint
+              };
+              new Razorpay(options).open();
+            </script>
+        """
+        meta_info = meta_info or {}
+        config: Dict[str, Any] = {
+            "key": self.key_id,
+            "order_id": order_id,
+            "amount": amount_paise,   # Razorpay Checkout JS expects paise
+            "currency": currency,
+            "name": meta_info.get("merchant_name", ""),
+            "description": description or meta_info.get("description", ""),
+        }
+        prefill = {
+            k: meta_info[k]
+            for k in ("name", "email", "contact", "phone")
+            if meta_info.get(k)
+        }
+        if "phone" in prefill and "contact" not in prefill:
+            prefill["contact"] = prefill.pop("phone")
+        if prefill:
+            config["prefill"] = prefill
+        return config
+
+    def verify_payment_signature(
+        self,
+        razorpay_payment_id: str,
+        razorpay_order_id: Optional[str] = None,
+        razorpay_subscription_id: Optional[str] = None,
+        razorpay_signature: str = "",
+    ) -> bool:
+        """Verify the payment signature received after Razorpay Checkout.
+
+        Call this on your backend after the frontend handler posts the
+        ``razorpay_payment_id`` / ``razorpay_signature`` pair.
+
+        For one-time orders::
+
+            provider.verify_payment_signature(
+                razorpay_payment_id=response["razorpay_payment_id"],
+                razorpay_order_id=response["razorpay_order_id"],
+                razorpay_signature=response["razorpay_signature"],
+            )
+
+        For subscriptions::
+
+            provider.verify_payment_signature(
+                razorpay_payment_id=response["razorpay_payment_id"],
+                razorpay_subscription_id=response["razorpay_subscription_id"],
+                razorpay_signature=response["razorpay_signature"],
+            )
+
+        Returns True when the signature is valid, raises ValueError on failure.
+        """
+        import hmac as _hmac
+        import hashlib as _hashlib
+
+        try:
+            if not razorpay_order_id and not razorpay_subscription_id:
+                raise ValueError(
+                    "Either razorpay_order_id or razorpay_subscription_id must be provided."
+                )
+
+            # The Razorpay SDK's verify_payment_signature always looks for
+            # razorpay_order_id via a hard key lookup, which raises KeyError for
+            # subscription payments.  Compute the HMAC-SHA256 directly instead.
+            if razorpay_order_id:
+                # Razorpay order signature: HMAC(order_id + "|" + payment_id)
+                message = f"{razorpay_order_id}|{razorpay_payment_id}"
+            else:
+                # Razorpay subscription signature: HMAC(payment_id + "|" + subscription_id)
+                message = f"{razorpay_payment_id}|{razorpay_subscription_id}"
+
+            expected = _hmac.new(
+                self.key_secret.encode("utf-8"),
+                message.encode("utf-8"),
+                _hashlib.sha256,
+            ).hexdigest()
+
+            if not _hmac.compare_digest(expected, razorpay_signature):
+                raise ValueError("Signature mismatch")
+
+            return True
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"Razorpay payment signature verification failed: {e}")
+            raise ValueError(f"Invalid payment signature: {e}") from e
+
     async def fetch_subscription_invoices(
         self, provider_subscription_id: str
     ) -> List[Dict[str, Any]]:
